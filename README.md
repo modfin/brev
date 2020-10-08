@@ -35,7 +35,7 @@ GLOBAL OPTIONS:
 ### Example
 
 ```bash 
-brev.go --subject="An attachment" \
+brev --subject="An attachment" \
         --to="someone@example.com" \
         --cc="someone-else@example.com" \
         --cc="someone-compleatly-different@example.com" \
