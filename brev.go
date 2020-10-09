@@ -1,19 +1,13 @@
 package main
 
 import (
-	"bytes"
-	"crypto/rand"
+	"errors"
 	"fmt"
+	"github.com/crholm/brev/internal/dnsx"
+	"github.com/crholm/brev/internal/smtpx"
+	"github.com/crholm/brev/internal/tools"
 	"github.com/urfave/cli/v2"
-	"gopkg.in/gomail.v2"
-	"math"
-	"math/big"
-	"net"
-	"net/smtp"
-	"net/url"
 	"os"
-	"os/user"
-	"time"
 )
 
 func main() {
@@ -82,66 +76,72 @@ func run(c *cli.Context) (err error) {
 	html := c.String("html")
 	attachments := c.StringSlice("attach")
 
-	m := gomail.NewMessage()
+	message := smtpx.NewMessage()
 
 	if len(from) == 0 {
-		from, err = getSystemUri()
+		from, err = tools.SystemUri()
 		if err != nil {
 			return err
 		}
 	}
 
 	if len(messageId) == 0 {
-		messageId, err = generateId()
+		messageId, err = smtpx.GenerateId()
 		if err != nil {
 			return err
 		}
 	}
 
-	m.SetHeader("Message-ID", fmt.Sprintf("<%s>", messageId))
-	m.SetHeader("Subject", subject)
-	m.SetHeader("From", from)
+	message.SetHeader("Message-ID", fmt.Sprintf("<%s>", messageId))
+	message.SetHeader("Subject", subject)
+	message.SetHeader("From", from)
 
-	var aggTo []string
+	var emails []string
 	if len(to) > 0 {
-		m.SetHeader("To", to...)
-		aggTo = append(aggTo, to...)
+		message.SetHeader("To", to...)
+		emails = append(emails, to...)
 	}
 	if len(cc) > 0 {
-		m.SetHeader("Cc", cc...)
-		aggTo = append(aggTo, cc...)
+		message.SetHeader("Cc", cc...)
+		emails = append(emails, cc...)
 	}
 	if len(bcc) > 0 {
-		aggTo = append(aggTo, bcc...)
+		emails = append(emails, bcc...)
 	}
 
+	if len(emails) == 0 {
+		return errors.New("there has to be at least 1 email to send to, cc or bcc")
+	}
+
+
 	if len(text) > 0 {
-		m.SetBody("text/plain", text)
+		message.SetBody("text/plain", text)
 	}
 	if len(html) > 0 {
-		m.SetBody("text/html", html)
+		message.SetBody("text/html", html)
 	}
 
 	for _, a := range attachments {
-		m.Attach(a)
+		message.Attach(a)
 	}
 
-	mxes, err := lookupMX(aggTo)
+	mxes, err := dnsx.LookupEmailMX(emails)
+	if err != nil{
+		return err
+	}
 
-	buff := &bytes.Buffer{}
-	_, err = m.WriteTo(buff)
-	if err != nil {
-		return
+	if len(mxes) == 0{
+		return errors.New("could not find any mx server to send mails to")
 	}
 
 	for _, mx := range mxes {
-		mx.To = uniq(mx.To)
+		mx.Emails = tools.Uniq(mx.Emails)
 		fmt.Println("Transferring emails for", mx.Domain, "to mx", mx.MX)
-		for _, t := range mx.To {
+		for _, t := range mx.Emails {
 			fmt.Println(" - ", t)
 		}
 
-		err = smtp.SendMail(mx.MX+":25", nil, from, mx.To, buff.Bytes())
+		err = smtpx.SendMail(mx.MX+":25", nil, from, mx.Emails, message)
 		if err != nil {
 			return
 		}
@@ -150,93 +150,7 @@ func run(c *cli.Context) (err error) {
 	return nil
 }
 
-type MX struct {
-	To     []string
-	Domain string
-	MX     string
-	IP     string
-}
 
-func lookupMX(tos []string) (map[string]MX, error) {
-	var mx = make(map[string]MX)
 
-	for _, to := range tos {
-		u, err := url.Parse("smtp://" + to)
-		if err != nil {
-			return nil, err
-		}
-		m, ok := mx[u.Host]
-		if !ok {
-			mx[u.Host] = MX{}
-		}
-		m = mx[u.Host]
-		m.To = append(m.To, to)
-		mx[u.Host] = m
 
-		if m.MX != "" {
-			continue
-		}
 
-		recs, err := net.LookupMX(u.Host)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, r := range recs {
-			ips, err := net.LookupIP(r.Host)
-			if err != nil {
-				return nil, err
-			}
-
-			if len(ips) > 0 {
-				m.MX = r.Host
-				m.Domain = u.Host
-				mx[u.Host] = m
-				break
-			}
-		}
-	}
-	return mx, nil
-}
-
-func getSystemUri() (string, error) {
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "localhost"
-	}
-
-	username := "unknown"
-	u, err := user.Current()
-	if err == nil {
-		username = u.Username
-	}
-	return fmt.Sprintf("%s@%s", username, hostname), nil
-}
-
-func generateId() (string, error) {
-	random, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
-	if err != nil {
-		return "", nil
-	}
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "localhost"
-	}
-	pid := os.Getpid()
-	nanoTime := time.Now().UTC().UnixNano()
-
-	return fmt.Sprintf("%d.%d.%d@%s", nanoTime, pid, random, hostname), nil
-}
-
-func uniq(strs []string) []string {
-	set := make(map[string]struct{})
-
-	for _, s := range strs {
-		set[s] = struct{}{}
-	}
-	var res []string
-	for s := range set {
-		res = append(res, s)
-	}
-	return res
-}
