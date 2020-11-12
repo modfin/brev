@@ -57,9 +57,18 @@ func main() {
 				Usage: "path to file attachment",
 			},
 			&cli.StringFlag{
-				Name:  "mx",
-				Usage: "user specific mx server",
+				Name:  "msa",
+				Usage: "use specific Mail Submission Agent, eg example.com:587",
 			},
+			&cli.StringFlag{
+				Name:  "msa-user",
+				Usage: "username for the msa server",
+			},
+			&cli.StringFlag{
+				Name:  "msa-pass",
+				Usage: "password for the msa server",
+			},
+
 		},
 		Action: run,
 	}
@@ -85,7 +94,9 @@ func run(c *cli.Context) (err error) {
 	text := c.String("text")
 	html := c.String("html")
 	attachments := c.StringSlice("attach")
-	mxServer := c.String("mx")
+	msaServer := c.String("msa")
+	msaUser := c.String("msa-user")
+	msaPass := c.String("msa-pass")
 
 	message := smtpx.NewMessage()
 
@@ -142,10 +153,18 @@ func run(c *cli.Context) (err error) {
 		}
 	}
 
-
-
 	for _, a := range attachments {
 		message.Attach(a)
+	}
+
+	if msaServer != "" {
+		var auth smtpx.Auth
+
+		if msaUser != "" && msaPass != ""{
+			auth = smtpx.PlainAuth("", msaUser, msaPass, strings.Split(msaServer, ":")[0])
+		}
+
+		return smtpx.SendMail(msaServer, auth, from, emails, message)
 	}
 
 	mxes, err := dnsx.LookupEmailMX(emails)
@@ -159,18 +178,11 @@ func run(c *cli.Context) (err error) {
 
 	for _, mx := range mxes {
 		mx.Emails = tools.Uniq(mx.Emails)
-
 		addr := mx.MX + ":25"
-		if mxServer != "" { // override
-			addr = mxServer
-		}
-
 		fmt.Println("Transferring emails for", mx.Domain, "to mx", "smtp://"+addr)
 		for _, t := range mx.Emails {
 			fmt.Println(" - ", t)
 		}
-
-
 
 		err = smtpx.SendMail(addr, nil, from, mx.Emails, message)
 		if err != nil {
