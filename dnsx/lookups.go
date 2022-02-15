@@ -12,7 +12,6 @@ type MX struct {
 	IP     string
 }
 
-
 func LookupEmailMX(emails []string) (map[string]MX, error) {
 	var mx = make(map[string]MX)
 
@@ -37,10 +36,6 @@ func LookupEmailMX(emails []string) (map[string]MX, error) {
 		if err != nil {
 			return nil, err
 		}
-
-		//rand.Shuffle(len(recs), func(i, j int) {
-		//	recs[i], recs[j] = recs[j], recs[i]
-		//})
 
 		for _, r := range recs {
 			ips, err := net.LookupIP(r.Host)

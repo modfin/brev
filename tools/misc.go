@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
+	"strings"
 )
 
 func SystemUri() (string, error) {
@@ -20,7 +22,6 @@ func SystemUri() (string, error) {
 	return fmt.Sprintf("%s@%s", username, hostname), nil
 }
 
-
 func Uniq(strs []string) []string {
 	set := make(map[string]struct{})
 
@@ -32,4 +33,12 @@ func Uniq(strs []string) []string {
 		res = append(res, s)
 	}
 	return res
+}
+
+func DomainOfEmail(address string) (string, error) {
+	parts := strings.Split(address, "@")
+	if len(parts) < 2 {
+		return "", errors.New("no domain was present in email address")
+	}
+	return parts[len(parts)-1], nil
 }

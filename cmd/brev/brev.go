@@ -3,9 +3,9 @@ package main
 import (
 	"errors"
 	"fmt"
-	"github.com/crholm/brev/internal/dnsx"
-	"github.com/crholm/brev/internal/smtpx"
-	"github.com/crholm/brev/internal/tools"
+	"github.com/crholm/brev/dnsx"
+	"github.com/crholm/brev/smtpx"
+	"github.com/crholm/brev/tools"
 	"github.com/urfave/cli/v2"
 	"os"
 	"strings"
@@ -68,7 +68,6 @@ func main() {
 				Name:  "msa-pass",
 				Usage: "password for the msa server",
 			},
-
 		},
 		Action: run,
 	}
@@ -160,7 +159,7 @@ func run(c *cli.Context) (err error) {
 	if msaServer != "" {
 		var auth smtpx.Auth
 
-		if msaUser != "" && msaPass != ""{
+		if msaUser != "" && msaPass != "" {
 			auth = smtpx.PlainAuth("", msaUser, msaPass, strings.Split(msaServer, ":")[0])
 		}
 
