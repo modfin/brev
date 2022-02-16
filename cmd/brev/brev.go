@@ -1,6 +1,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"github.com/crholm/brev/dnsx"
@@ -8,13 +13,26 @@ import (
 	"github.com/crholm/brev/tools"
 	"github.com/urfave/cli/v2"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 func main() {
 	app := &cli.App{
 		Name:  "brev",
-		Usage: "a cli that send email directly to the mx servers",
+		Usage: "a cli that send email directly to the mx servers and other mail utilities",
+
+		Commands: []*cli.Command{
+			{
+				Name: "gen-dkim-keys",
+				Flags: []cli.Flag{
+					&cli.IntFlag{Name: "key-size", Value: 2048},
+					&cli.StringFlag{Name: "out", Value: "./"},
+				},
+				Action: gendkim,
+			},
+		},
+
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "subject",
@@ -69,7 +87,7 @@ func main() {
 				Usage: "password for the msa server",
 			},
 		},
-		Action: run,
+		Action: sendmail,
 	}
 
 	err := app.Run(os.Args)
@@ -79,7 +97,54 @@ func main() {
 	}
 }
 
-func run(c *cli.Context) (err error) {
+func gendkim(c *cli.Context) (err error) {
+	keysize := c.Int("key-size")
+	privatekey, err := rsa.GenerateKey(rand.Reader, keysize)
+	if err != nil {
+		return err
+	}
+
+	var privateKeyBytes = x509.MarshalPKCS1PrivateKey(privatekey)
+	privateKeyBlock := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: privateKeyBytes,
+	}
+
+	privatePemFile, err := os.Create(filepath.Join(c.String("out"), "dkim-private.pem"))
+	if err != nil {
+		fmt.Printf("error when create dkim-private.pem: %s \n", err)
+		return err
+	}
+	defer privatePemFile.Close()
+
+	err = pem.Encode(privatePemFile, privateKeyBlock)
+	if err != nil {
+		fmt.Printf("error when encode private pem: %s \n", err)
+		return err
+	}
+
+	publickey := &privatekey.PublicKey
+	publickeyBytes, err := x509.MarshalPKIXPublicKey(publickey)
+	if err != nil {
+		return err
+	}
+	pubRecord := fmt.Sprintf("v=DKIM1; k=rsa; p=%s;", base64.StdEncoding.EncodeToString(publickeyBytes))
+
+	pubRecordFile, err := os.Create(filepath.Join(c.String("out"), "dkim-pub.dns.txt"))
+	if err != nil {
+		return err
+	}
+	defer pubRecordFile.Close()
+
+	_, err = pubRecordFile.Write([]byte(pubRecord))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func sendmail(c *cli.Context) (err error) {
 
 	subject := c.String("subject")
 	from := c.String("from")
@@ -166,18 +231,20 @@ func run(c *cli.Context) (err error) {
 		return smtpx.SendMail(msaServer, auth, from, emails, message)
 	}
 
-	mxes, err := dnsx.LookupEmailMX(emails)
-	if err != nil {
-		return err
-	}
+	transferlist := dnsx.LookupEmailMX(emails)
 
-	if len(mxes) == 0 {
+	if len(transferlist) == 0 {
 		return errors.New("could not find any mx server to send mails to")
 	}
 
-	for _, mx := range mxes {
+	for _, mx := range transferlist {
+		if len(mx.MXServers) == 0 {
+			fmt.Println("could not find mx server for", mx.Emails)
+			continue
+		}
+
 		mx.Emails = tools.Uniq(mx.Emails)
-		addr := mx.MX + ":25"
+		addr := mx.MXServers[0] + ":25"
 		fmt.Println("Transferring emails for", mx.Domain, "to mx", "smtp://"+addr)
 		for _, t := range mx.Emails {
 			fmt.Println(" - ", t)

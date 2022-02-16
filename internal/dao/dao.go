@@ -1,6 +1,7 @@
 package dao
 
 import (
+	"errors"
 	"fmt"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
@@ -80,10 +81,10 @@ func (s *sqlite) AddSpoolLogEntry(messageId, log string) error {
 
 func (s *sqlite) AddSpoolLogEntryTx(tx *sqlx.Tx, messageId, log string) error {
 	q := `
-	INSERT INTO spool_log (message_id, log)
-	VALUES (?,?)
+	INSERT INTO spool_log (message_id, created_at, log)
+	VALUES (?, ?, ?)
 	`
-	_, err := tx.Exec(q, messageId, log)
+	_, err := tx.Exec(q, messageId, time.Now().In(time.UTC), log)
 	return err
 }
 
@@ -132,7 +133,7 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 	q1 := `
 	    SELECT *
 		FROM spool
-		WHERE send_at < CURRENT_TIMESTAMP
+		WHERE send_at <= ?
 		  AND status_brev = 'queued'
 		ORDER BY send_at
 		LIMIT ?
@@ -151,7 +152,7 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 		_ = tx.Rollback()
 	}()
 
-	err = tx.Select(&emails, q1, count)
+	err = tx.Select(&emails, q1, time.Now().In(time.UTC), count)
 	if err != nil {
 		return
 	}
@@ -167,6 +168,8 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 }
 
 func (s *sqlite) GetApiKey(key string) (*ApiKey, error) {
+	// TODO add cache for keys...
+
 	q := `SELECT * FROM api_key WHERE api_key = ?`
 	db, err := s.getDB()
 	if err != nil {
@@ -177,30 +180,50 @@ func (s *sqlite) GetApiKey(key string) (*ApiKey, error) {
 	return &apiKey, err
 }
 
+func (s *sqlite) tuneDatabase() error {
+	q := `pragma journal_mode = WAL;
+			pragma synchronous = normal;
+			pragma temp_store = memory;
+			pragma mmap_size = 30000000000;`
+
+	if s.db == nil {
+		return errors.New("db must be instantiated")
+	}
+	_, err := s.db.Exec(q)
+	return err
+}
+
 func (s *sqlite) getDB() (*sqlx.DB, error) {
 
 	var err error
-	if s.db == nil {
-		fmt.Println("connecting to db", s.path)
+	// this seems like it could be optimized in general... some other process checking health and reconnecting.
+	// Along with some hourly job running `pragma optimize;`
+	for s.db == nil || s.db.Ping() != nil {
+
+		if s.db != nil {
+			_ = s.db.Close()
+			s.db = nil
+		}
+
+		fmt.Println("Connecting to db", s.path)
 		s.db, err = sqlx.Connect("sqlite3", s.path)
+		if err != nil {
+			return nil, fmt.Errorf("error while connecting, %w", err)
+		}
+		err := s.tuneDatabase()
+		if err != nil {
+			return nil, fmt.Errorf("error while tuning db instence, %w", err)
+		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("error while connecting, %w", err)
-	}
-	// TODO do something to verify connection and reconnect... s.db.Ping / reconnect...
-	return s.db, err
+
+	return s.db, nil
 }
 func (s *sqlite) getTX() (*sqlx.Tx, error) {
-
-	var err error
-	if s.db == nil {
-		s.db, err = sqlx.Connect("sqlite3", s.path)
-	}
+	db, err := s.getDB()
 	if err != nil {
-		return nil, fmt.Errorf("error while connecting, %w", err)
+		return nil, err
 	}
-	// TODO do something to verify connection and reconnect... s.db.Ping / reconnect...
-	return s.db.Beginx()
+	return db.Beginx()
 }
 
 func (s *sqlite) ensureSchema() error {

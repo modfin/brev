@@ -40,16 +40,16 @@ func main() {
 	case sig := <-sigc:
 		fmt.Println("SIGNAL:", sig.String())
 	case <-apiDone:
-		fmt.Println("Unexpected closing of api server")
+		fmt.Println("[Brev]: Unexpected closing of api server")
 	case <-mtaDone:
-		fmt.Println("Unexpected closing of mta server")
+		fmt.Println("[Brev]: Unexpected closing of mta server")
 	}
 
-	fmt.Println("Initiating server shutdown")
+	fmt.Println("[Brev]: Initiating server shutdown")
 	cancel()
 	select {
 	case <-apiDone:
 	case <-time.After(10 * time.Second):
 	}
-	fmt.Println("Shutdown complete")
+	fmt.Println("[Brev]: Shutdown complete, terminating now")
 }

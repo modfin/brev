@@ -7,6 +7,7 @@ import (
 	"github.com/crholm/brev"
 	"github.com/crholm/brev/internal/config"
 	"github.com/crholm/brev/internal/dao"
+	"github.com/crholm/brev/internal/signals"
 	"github.com/crholm/brev/tools"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -119,7 +120,13 @@ func EnqueueMTA(db dao.DAO) echo.HandlerFunc {
 		}
 
 		err = db.AddEmailToSpool(spoolmail)
+		if err != nil {
+			return err
+		}
 
-		return err
+		// Informs MTA to wake up and start processing mail if a sleep at the moment.
+		signals.Broadcast(signals.NewMailInSpool)
+
+		return c.JSONBlob(200, []byte(fmt.Sprintf(`{"message_id": "%s" }`, spoolmail.MessageId)))
 	}
 }

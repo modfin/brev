@@ -12,7 +12,7 @@ import (
 )
 
 func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
-	fmt.Println("Starting API")
+	fmt.Println("[API]: Starting API")
 
 	done = make(chan interface{})
 	once := sync.Once{}
@@ -33,12 +33,12 @@ func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
 
 	go func() {
 		<-ctx.Done()
-		fmt.Println("Shutting down api server")
+		fmt.Println("[API]: Shutting down api server")
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		err := e.Shutdown(shutdown)
 		if err != nil {
-			fmt.Println("shutdown err,", err)
+			fmt.Println("[API]: shutdown err,", err)
 		}
 		closer()
 	}()
@@ -46,7 +46,7 @@ func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
 	go func() {
 		err := e.Start(":1234")
 		if err != nil {
-			fmt.Println(err)
+			fmt.Println("[API]: stopped err,", err)
 		}
 		closer()
 	}()

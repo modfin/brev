@@ -1,55 +1,49 @@
 package dnsx
 
 import (
+	"github.com/crholm/brev/tools"
 	"net"
-	"net/url"
+	"sort"
 )
 
-type MX struct {
-	Emails []string
-	Domain string
-	MX     string
-	IP     string
+type TransferList struct {
+	Domain    string
+	Emails    []string
+	MXServers []string
+	Err       error
 }
 
-func LookupEmailMX(emails []string) (map[string]MX, error) {
-	var mx = make(map[string]MX)
+func LookupEmailMX(emails []string) []TransferList {
+	var mx []TransferList
 
-	for _, to := range emails {
-		u, err := url.Parse("smtp://" + to)
+	var buckets = map[string][]string{}
+
+	for _, address := range emails {
+		domain, err := tools.DomainOfEmail(address)
 		if err != nil {
-			return nil, err
-		}
-		m, ok := mx[u.Host]
-		if !ok {
-			mx[u.Host] = MX{}
-		}
-		m = mx[u.Host]
-		m.Emails = append(m.Emails, to)
-		mx[u.Host] = m
-
-		if m.MX != "" {
 			continue
 		}
-
-		recs, err := net.LookupMX(u.Host)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, r := range recs {
-			ips, err := net.LookupIP(r.Host)
-			if err != nil {
-				return nil, err
-			}
-
-			if len(ips) > 0 {
-				m.MX = r.Host
-				m.Domain = u.Host
-				mx[u.Host] = m
-				break
-			}
-		}
+		buckets[domain] = append(buckets[domain], address)
 	}
-	return mx, nil
+
+	for domain, addresses := range buckets {
+		recs, err := net.LookupMX(domain)
+		sort.Slice(recs, func(i, j int) bool {
+			return recs[i].Pref < recs[j].Pref
+		})
+		var servers []string
+		for _, rec := range recs {
+			servers = append(servers, rec.Host)
+		}
+
+		mx = append(mx, TransferList{
+			Domain:    domain,
+			Emails:    addresses,
+			MXServers: servers,
+			Err:       err,
+		})
+
+	}
+	return mx
+
 }

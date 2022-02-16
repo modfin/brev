@@ -3,6 +3,7 @@ package tools
 import (
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/user"
 	"strings"
@@ -41,4 +42,14 @@ func DomainOfEmail(address string) (string, error) {
 		return "", errors.New("no domain was present in email address")
 	}
 	return parts[len(parts)-1], nil
+}
+
+var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890")
+
+func RandStringRunes(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
 }

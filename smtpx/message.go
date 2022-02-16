@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const MessageDateFormat = time.RFC1123Z
+
 // Message represents an email.
 type Message struct {
 	header      header
@@ -108,6 +110,11 @@ func (m *Message) SetHeader(field string, value ...string) {
 	m.header[field] = value
 }
 
+func (m *Message) AddToHeader(field string, value ...string) {
+	m.encodeHeader(value)
+	m.header[field] = append(m.header[field], value...)
+}
+
 func (m *Message) encodeHeader(values []string) {
 	for i := range values {
 		values[i] = m.encodeString(values[i])
@@ -179,7 +186,7 @@ func (m *Message) SetDateHeader(field string, date time.Time) {
 
 // FormatDate formats a date as a valid RFC 5322 date.
 func (m *Message) FormatDate(date time.Time) string {
-	return date.Format(time.RFC1123Z)
+	return date.Format(MessageDateFormat)
 }
 
 // GetHeader gets a header field.
@@ -325,7 +332,6 @@ func (m *Message) Attach(filename string, settings ...FileSetting) {
 func (m *Message) Embed(filename string, settings ...FileSetting) {
 	m.embedded = m.appendFile(m.embedded, filename, settings)
 }
-
 
 // WriteTo implements io.WriterTo. It dumps the whole message into w.
 func (m *Message) WriteTo(w io.Writer) (int64, error) {
@@ -620,4 +626,3 @@ func (w *base64LineWriter) Write(p []byte) (int, error) {
 
 // Stubbed out for testing.
 var now = time.Now
-
