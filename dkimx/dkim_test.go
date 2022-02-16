@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"net"
 	"testing"
 
@@ -231,61 +232,81 @@ func Test_NewSigOptions(t *testing.T) {
 	assert.Equal(t, "simple/simple", options.Canonicalization)
 }
 
+func loadPrivateKey(key []byte) (*rsa.PrivateKey, error) {
+	d, _ := pem.Decode(key)
+	if d == nil {
+		return nil, errors.New("could not decode private dkim key from config")
+	}
+	// try to parse it as PKCS1 otherwise try PKCS8
+	var privateKey *rsa.PrivateKey
+	if key, err := x509.ParsePKCS1PrivateKey(d.Bytes); err != nil {
+		if key, err := x509.ParsePKCS8PrivateKey(d.Bytes); err != nil {
+			return nil, errors.New("found no standard to decode private dkim key")
+		} else {
+			privateKey = key.(*rsa.PrivateKey)
+		}
+	} else {
+		privateKey = key
+	}
+	privateKey.Precompute()
+	return privateKey, nil
+}
+
 func Test_SignConfig(t *testing.T) {
 	email := []byte(emailBase)
 	emailToTest := append([]byte(nil), email...)
 	options := NewSigOptions()
-	err := Sign(&emailToTest, options)
+	err := Sign(&emailToTest, options, nil)
 	assert.NotNil(t, err)
 	// && err No private key
 	assert.EqualError(t, err, ErrSignPrivateKeyRequired.Error())
-	options.PrivateKey = []byte(privKey)
+	privateKey, _ := loadPrivateKey([]byte(privKey))
 	emailToTest = append([]byte(nil), email...)
-	err = Sign(&emailToTest, options)
+	err = Sign(&emailToTest, options, privateKey)
 
 	// Domain
 	assert.EqualError(t, err, ErrSignDomainRequired.Error())
 	options.Domain = "toorop.fr"
 	emailToTest = append([]byte(nil), email...)
-	err = Sign(&emailToTest, options)
+	err = Sign(&emailToTest, options, privateKey)
 
 	// Selector
 	assert.Error(t, err, ErrSignSelectorRequired.Error())
 	options.Selector = "default"
 	emailToTest = append([]byte(nil), email...)
-	err = Sign(&emailToTest, options)
+	err = Sign(&emailToTest, options, privateKey)
 	assert.NoError(t, err)
 
 	// Canonicalization
 	options.Canonicalization = "simple/relaxed/simple"
 	emailToTest = append([]byte(nil), email...)
-	err = Sign(&emailToTest, options)
+	err = Sign(&emailToTest, options, privateKey)
 	assert.EqualError(t, err, ErrSignBadCanonicalization.Error())
 
 	options.Canonicalization = "simple/relax"
 	emailToTest = append([]byte(nil), email...)
-	err = Sign(&emailToTest, options)
+	err = Sign(&emailToTest, options, privateKey)
 	assert.EqualError(t, err, ErrSignBadCanonicalization.Error())
 
 	options.Canonicalization = "relaxed"
 	emailToTest = append([]byte(nil), email...)
-	err = Sign(&emailToTest, options)
+	err = Sign(&emailToTest, options, privateKey)
 	assert.NoError(t, err)
 
 	options.Canonicalization = "SiMple/relAxed"
 	emailToTest = append([]byte(nil), email...)
-	err = Sign(&emailToTest, options)
+	err = Sign(&emailToTest, options, privateKey)
 	assert.NoError(t, err)
 
 	// header
 	options.Headers = []string{"toto"}
 	emailToTest = append([]byte(nil), email...)
-	err = Sign(&emailToTest, options)
+	err = Sign(&emailToTest, options, privateKey)
 	assert.EqualError(t, err, ErrSignHeaderShouldContainsFrom.Error())
 
 	options.Headers = []string{"To", "From"}
 	emailToTest = append([]byte(nil), email...)
-	err = Sign(&emailToTest, options)
+	err = Sign(&emailToTest, options, privateKey)
 	assert.NoError(t, err)
 
 }
@@ -316,7 +337,8 @@ func Test_Sign(t *testing.T) {
 	email := []byte(emailBase)
 	emailRelaxed := append([]byte(nil), email...)
 	options := NewSigOptions()
-	options.PrivateKey = []byte(privKey)
+	privateKey, _ := loadPrivateKey([]byte(privKey))
+
 	options.Domain = domain
 	options.Selector = selector
 	//options.SignatureExpireIn = 3600
@@ -324,31 +346,31 @@ func Test_Sign(t *testing.T) {
 	options.AddSignatureTimestamp = false
 
 	options.Canonicalization = "relaxed/relaxed"
-	err := Sign(&emailRelaxed, options)
+	err := Sign(&emailRelaxed, options, privateKey)
 	assert.NoError(t, err)
 	assert.Equal(t, []byte(signedRelaxedRelaxed), emailRelaxed)
 
 	options.BodyLength = 5
 	emailRelaxed = append([]byte(nil), email...)
-	err = Sign(&emailRelaxed, options)
+	err = Sign(&emailRelaxed, options, privateKey)
 	assert.NoError(t, err)
 	assert.Equal(t, []byte(signedRelaxedRelaxedLength), emailRelaxed)
 
 	options.BodyLength = 0
 	options.Canonicalization = "simple/simple"
 	emailSimple := append([]byte(nil), email...)
-	err = Sign(&emailSimple, options)
+	err = Sign(&emailSimple, options, privateKey)
 	assert.Equal(t, []byte(signedSimpleSimple), emailSimple)
 
 	options.Headers = []string{"from", "subject", "date", "message-id"}
 	memail := []byte(missingHeaderMail)
-	err = Sign(&memail, options)
+	err = Sign(&memail, options, privateKey)
 	assert.NoError(t, err)
 
 	options.BodyLength = 5
 	options.Canonicalization = "simple/simple"
 	emailSimple = append([]byte(nil), email...)
-	err = Sign(&emailSimple, options)
+	err = Sign(&emailSimple, options, privateKey)
 	assert.Equal(t, []byte(signedSimpleSimpleLength), emailSimple)
 
 }
