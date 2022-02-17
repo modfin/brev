@@ -373,6 +373,77 @@ func SendMail(addr string, a Auth, from string, to []string, msg io.WriterTo) er
 	return c.Quit()
 }
 
+type Connection struct {
+	client *Client
+}
+
+func (c *Connection) SendMail(from string, to []string, msg io.WriterTo) error {
+	var err error
+	if err = validateLine(from); err != nil {
+		return err
+	}
+	for _, recp := range to {
+		if err = validateLine(recp); err != nil {
+			return err
+		}
+	}
+	if err = c.client.Mail(from); err != nil {
+		return err
+	}
+	for _, addr := range to {
+		if err = c.client.Rcpt(addr); err != nil {
+			return err
+		}
+	}
+	w, err := c.client.Data()
+	if err != nil {
+		return err
+	}
+	_, err = msg.WriteTo(w)
+	if err != nil {
+		return err
+	}
+	err = w.Close()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Connection) Close() error {
+	return c.client.Quit()
+}
+
+func NewConnection(addr string, a Auth) (*Connection, error) {
+	c := &Connection{}
+	var err error
+	c.client, err = Dial(addr)
+	if err != nil {
+		return nil, err
+	}
+	if err = c.client.hello(); err != nil {
+		return nil, err
+	}
+	if ok, _ := c.client.Extension("STARTTLS"); ok {
+		config := &tls.Config{ServerName: c.client.serverName}
+		if testHookStartTLS != nil {
+			testHookStartTLS(config)
+		}
+		if err = c.client.StartTLS(config); err != nil {
+			return nil, err
+		}
+	}
+	if a != nil && c.client.ext != nil {
+		if _, ok := c.client.ext["AUTH"]; !ok {
+			return nil, errors.New("smtp: server doesn't support AUTH")
+		}
+		if err = c.client.Auth(a); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
 // Extension reports whether an extension is support by the server.
 // The extension name is case-insensitive. If the extension is supported,
 // Extension also returns a string that contains any parameters the

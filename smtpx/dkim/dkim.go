@@ -1,5 +1,5 @@
 // Package dkim provides tools for signing and verify a email according to RFC 6376
-package dkimx
+package dkim
 
 import (
 	"bytes"
@@ -9,9 +9,14 @@ import (
 	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
+	"errors"
+	"github.com/crholm/brev/tools"
 	"hash"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -82,7 +87,7 @@ type SigOptions struct {
 func NewSigOptions() SigOptions {
 	return SigOptions{
 		Version:               1,
-		Canonicalization:      "simple/simple",
+		Canonicalization:      "relaxed/relaxed",
 		Algo:                  "rsa-sha256",
 		Headers:               []string{"from"},
 		BodyLength:            0,
@@ -90,6 +95,67 @@ func NewSigOptions() SigOptions {
 		AddSignatureTimestamp: true,
 		SignatureExpireIn:     0,
 	}
+}
+
+type Op func(op *SigOptions)
+
+func OpDomain(domain string) Op {
+	return func(op *SigOptions) {
+		op.Domain = domain
+	}
+}
+func OpSelector(selector string) Op {
+	return func(op *SigOptions) {
+		op.Selector = selector
+	}
+}
+
+func OpAddHeader(header string) Op {
+	return func(op *SigOptions) {
+		op.Headers = append(op.Headers, header)
+	}
+}
+
+type Signer struct {
+	privateKey *rsa.PrivateKey
+	mods       []Op
+}
+
+func (s *Signer) With(op Op) *Signer {
+	return &Signer{
+		privateKey: s.privateKey,
+		mods:       append(append([]Op(nil), s.mods...), op),
+	}
+}
+
+func (s *Signer) Sign(email *[]byte) error {
+	options := NewSigOptions()
+	for _, op := range s.mods {
+		op(&options)
+	}
+	options.Headers = tools.Uniq(options.Headers)
+	sort.Strings(options.Headers)
+	return Sign(email, options, s.privateKey)
+}
+
+func NewSigner(privateKeyPem string) (*Signer, error) {
+	d, _ := pem.Decode([]byte(privateKeyPem))
+	if d == nil {
+		return nil, errors.New("could not decode private dkim key from config")
+	}
+	// try to parse it as PKCS1 otherwise try PKCS8
+	var privateKey *rsa.PrivateKey
+	if key, err := x509.ParsePKCS1PrivateKey(d.Bytes); err != nil {
+		if key, err := x509.ParsePKCS8PrivateKey(d.Bytes); err != nil {
+			return nil, errors.New("found no standard to decode private dkim key")
+		} else {
+			privateKey = key.(*rsa.PrivateKey)
+		}
+	} else {
+		privateKey = key
+	}
+	privateKey.Precompute()
+	return &Signer{privateKey: privateKey}, nil
 }
 
 // Sign signs an email

@@ -1,4 +1,4 @@
-package smtpx
+package envelope
 
 import (
 	"mime"

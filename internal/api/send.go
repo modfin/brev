@@ -1,13 +1,14 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/crholm/brev"
 	"github.com/crholm/brev/internal/config"
 	"github.com/crholm/brev/internal/dao"
 	"github.com/crholm/brev/internal/signals"
+	"github.com/crholm/brev/smtpx/dkim"
+	"github.com/crholm/brev/smtpx/envelope"
 	"github.com/crholm/brev/tools"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -25,7 +26,7 @@ func getApiKey(c echo.Context, db dao.DAO) (*dao.ApiKey, error) {
 	return db.GetApiKey(key)
 }
 
-func validateFrom(key *dao.ApiKey, email brev.Email) error {
+func validateFrom(key *dao.ApiKey, email *brev.Email) error {
 	// if bad formatting
 	from := email.From
 	_, err := mail.ParseAddress(from.String())
@@ -42,7 +43,7 @@ func validateFrom(key *dao.ApiKey, email brev.Email) error {
 	return nil
 }
 
-func validateRecipients(email brev.Email) error {
+func validateRecipients(email *brev.Email) error {
 
 	addresses := append([]brev.Address(nil), email.To...)
 	addresses = append(addresses, email.Cc...)
@@ -57,14 +58,14 @@ func validateRecipients(email brev.Email) error {
 	return nil
 }
 
-func validateSubject(email brev.Email) error {
+func validateSubject(email *brev.Email) error {
 	if len(email.Subject) == 0 {
 		return errors.New("a subject must be provided")
 	}
 	return nil
 }
 
-func validateContent(email brev.Email) error {
+func validateContent(email *brev.Email) error {
 	if len(email.Text) == 0 && len(email.HTML) == 0 {
 		return errors.New("content of the email must be provided")
 	}
@@ -75,18 +76,19 @@ func newMessageId() string {
 	return fmt.Sprintf("%s=%s", uuid.New().String(), config.Get().Hostname)
 }
 
-func EnqueueMTA(db dao.DAO) echo.HandlerFunc {
+func EnqueueMTA(db dao.DAO, signer *dkim.Signer) echo.HandlerFunc {
+
 	return func(c echo.Context) error {
 
 		key, err := getApiKey(c, db)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to retrive key, err %v", err)
 		}
 
-		var email brev.Email
+		email := brev.NewEmail()
 		err = c.Bind(&email)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to bind body, err %v", err)
 		}
 
 		err = validateFrom(key, email)
@@ -109,19 +111,36 @@ func EnqueueMTA(db dao.DAO) echo.HandlerFunc {
 			return err
 		}
 
-		content, err := json.Marshal(email)
+		var messageId = newMessageId()
+
+		// Set default headers
+		mxDomain := config.Get().MXDomain
+		if len(key.MxCNAME) > 3 {
+			mxDomain = key.MxCNAME
+		}
+		email.Headers["Return-Path"] = []string{fmt.Sprintf("<bounces_%s@%s>", messageId, mxDomain)}
+		email.Headers["Message-ID"] = []string{fmt.Sprintf("<%s@%s>", messageId, config.Get().Hostname)}
+		email.Headers["Date"] = []string{time.Now().In(time.UTC).Format(envelope.MessageDateFormat)}
 
 		spoolmail := dao.SpoolEmail{
-			MessageId:  newMessageId(),
+			MessageId:  messageId,
 			ApiKey:     key.Key,
-			StatusBrev: dao.BrevStatusQueued,
-			Content:    content,
-			SendAt:     time.Now(),
+			From:       email.From.Email,
+			Recipients: email.Recipients(),
 		}
 
-		err = db.AddEmailToSpool(spoolmail)
+		localSigner := signer.
+			With(dkim.OpDomain(key.Domain)).
+			With(dkim.OpSelector(config.Get().DKIMSelector))
+
+		content, err := envelope.MarshalFromEmail(email, localSigner)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to marshal envelop, err %v", err)
+		}
+
+		err = db.AddEmailToSpool(spoolmail, content)
+		if err != nil {
+			return fmt.Errorf("failed to add to spool, err %v", err)
 		}
 
 		// Informs MTA to wake up and start processing mail if a sleep at the moment.

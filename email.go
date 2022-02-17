@@ -6,6 +6,12 @@ import (
 	"mime"
 )
 
+func NewEmail() *Email {
+	return &Email{
+		Headers: map[string][]string{},
+	}
+}
+
 type Email struct {
 	Headers map[string][]string `json:"headers"`
 	From    Address             `json:"from"`
@@ -17,6 +23,14 @@ type Email struct {
 	Text    string              `json:"text"`
 
 	Attachments []Attachment `json:"attachments"`
+}
+
+func (e *Email) Recipients() []string {
+	var recipients []string
+	for _, a := range append([]Address(nil), append(append(e.To, e.Cc...), e.Bcc...)...) {
+		recipients = append(recipients, a.Email)
+	}
+	return recipients
 }
 
 func (e *Email) AddAttachments(filename string, contentType string, data []byte) {

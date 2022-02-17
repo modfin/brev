@@ -1,4 +1,4 @@
-package dkimx
+package dkim
 
 import (
 	"errors"

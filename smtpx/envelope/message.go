@@ -1,4 +1,4 @@
-package smtpx
+package envelope
 
 import (
 	"bytes"
@@ -15,8 +15,8 @@ import (
 
 const MessageDateFormat = time.RFC1123Z
 
-// Message represents an email.
-type Message struct {
+// Envelope represents an email.
+type Envelope struct {
 	header      header
 	parts       []*part
 	attachments []*file
@@ -35,10 +35,10 @@ type part struct {
 	encoding    Encoding
 }
 
-// NewMessage creates a new message. It uses UTF-8 and quoted-printable encoding
+// NewEnvelope creates a new message. It uses UTF-8 and quoted-printable encoding
 // by default.
-func NewMessage(settings ...MessageSetting) *Message {
-	m := &Message{
+func NewEnvelope(settings ...Setting) *Envelope {
+	m := &Envelope{
 		header:   make(header),
 		charset:  "UTF-8",
 		encoding: QuotedPrintable,
@@ -56,8 +56,8 @@ func NewMessage(settings ...MessageSetting) *Message {
 }
 
 // Reset resets the message so it can be reused. The message keeps its previous
-// settings so it is in the same state that after a call to NewMessage.
-func (m *Message) Reset() {
+// settings so it is in the same state that after a call to NewEnvelope.
+func (m *Envelope) Reset() {
 	for k := range m.header {
 		delete(m.header, k)
 	}
@@ -66,26 +66,26 @@ func (m *Message) Reset() {
 	m.embedded = nil
 }
 
-func (m *Message) applySettings(settings []MessageSetting) {
+func (m *Envelope) applySettings(settings []Setting) {
 	for _, s := range settings {
 		s(m)
 	}
 }
 
-// A MessageSetting can be used as an argument in NewMessage to configure an
+// A Setting can be used as an argument in NewEnvelope to configure an
 // email.
-type MessageSetting func(m *Message)
+type Setting func(m *Envelope)
 
 // SetCharset is a message setting to set the charset of the email.
-func SetCharset(charset string) MessageSetting {
-	return func(m *Message) {
+func SetCharset(charset string) Setting {
+	return func(m *Envelope) {
 		m.charset = charset
 	}
 }
 
 // SetEncoding is a message setting to set the encoding of the email.
-func SetEncoding(enc Encoding) MessageSetting {
-	return func(m *Message) {
+func SetEncoding(enc Encoding) Setting {
+	return func(m *Envelope) {
 		m.encoding = enc
 	}
 }
@@ -105,40 +105,40 @@ const (
 )
 
 // SetHeader sets a value to the given header field.
-func (m *Message) SetHeader(field string, value ...string) {
+func (m *Envelope) SetHeader(field string, value ...string) {
 	m.encodeHeader(value)
 	m.header[field] = value
 }
 
-func (m *Message) AddToHeader(field string, value ...string) {
+func (m *Envelope) AppendHeader(field string, value ...string) {
 	m.encodeHeader(value)
 	m.header[field] = append(m.header[field], value...)
 }
 
-func (m *Message) encodeHeader(values []string) {
+func (m *Envelope) encodeHeader(values []string) {
 	for i := range values {
 		values[i] = m.encodeString(values[i])
 	}
 }
 
-func (m *Message) encodeString(value string) string {
+func (m *Envelope) encodeString(value string) string {
 	return m.hEncoder.Encode(m.charset, value)
 }
 
 // SetHeaders sets the message headers.
-func (m *Message) SetHeaders(h map[string][]string) {
+func (m *Envelope) SetHeaders(h map[string][]string) {
 	for k, v := range h {
 		m.SetHeader(k, v...)
 	}
 }
 
 // SetAddressHeader sets an address to the given header field.
-func (m *Message) SetAddressHeader(field, address, name string) {
+func (m *Envelope) SetAddressHeader(field, address, name string) {
 	m.header[field] = []string{m.FormatAddress(address, name)}
 }
 
 // FormatAddress formats an address and a name as a valid RFC 5322 address.
-func (m *Message) FormatAddress(address, name string) string {
+func (m *Envelope) FormatAddress(address, name string) string {
 	if name == "" {
 		return address
 	}
@@ -180,23 +180,23 @@ func hasSpecials(text string) bool {
 }
 
 // SetDateHeader sets a date to the given header field.
-func (m *Message) SetDateHeader(field string, date time.Time) {
+func (m *Envelope) SetDateHeader(field string, date time.Time) {
 	m.header[field] = []string{m.FormatDate(date)}
 }
 
 // FormatDate formats a date as a valid RFC 5322 date.
-func (m *Message) FormatDate(date time.Time) string {
+func (m *Envelope) FormatDate(date time.Time) string {
 	return date.Format(MessageDateFormat)
 }
 
 // GetHeader gets a header field.
-func (m *Message) GetHeader(field string) []string {
+func (m *Envelope) GetHeader(field string) []string {
 	return m.header[field]
 }
 
 // SetBody sets the body of the message. It replaces any content previously set
 // by SetBody, AddAlternative or AddAlternativeWriter.
-func (m *Message) SetBody(contentType, body string, settings ...PartSetting) {
+func (m *Envelope) SetBody(contentType, body string, settings ...PartSetting) {
 	m.parts = []*part{m.newPart(contentType, newCopier(body), settings)}
 }
 
@@ -206,7 +206,7 @@ func (m *Message) SetBody(contentType, body string, settings ...PartSetting) {
 // version for backward compatibility. AddAlternative appends the new part to
 // the end of the message. So the plain text part should be added before the
 // HTML part. See http://en.wikipedia.org/wiki/MIME#Alternative
-func (m *Message) AddAlternative(contentType, body string, settings ...PartSetting) {
+func (m *Envelope) AddAlternative(contentType, body string, settings ...PartSetting) {
 	m.AddAlternativeWriter(contentType, newCopier(body), settings...)
 }
 
@@ -219,11 +219,11 @@ func newCopier(s string) func(io.Writer) error {
 
 // AddAlternativeWriter adds an alternative part to the message. It can be
 // useful with the text/template or html/template packages.
-func (m *Message) AddAlternativeWriter(contentType string, f func(io.Writer) error, settings ...PartSetting) {
+func (m *Envelope) AddAlternativeWriter(contentType string, f func(io.Writer) error, settings ...PartSetting) {
 	m.parts = append(m.parts, m.newPart(contentType, f, settings))
 }
 
-func (m *Message) newPart(contentType string, f func(io.Writer) error, settings []PartSetting) *part {
+func (m *Envelope) newPart(contentType string, f func(io.Writer) error, settings []PartSetting) *part {
 	p := &part{
 		contentType: contentType,
 		copier:      f,
@@ -237,8 +237,8 @@ func (m *Message) newPart(contentType string, f func(io.Writer) error, settings 
 	return p
 }
 
-// A PartSetting can be used as an argument in Message.SetBody,
-// Message.AddAlternative or Message.AddAlternativeWriter to configure the part
+// A PartSetting can be used as an argument in Envelope.SetBody,
+// Envelope.AddAlternative or Envelope.AddAlternativeWriter to configure the part
 // added to a message.
 type PartSetting func(*part)
 
@@ -260,7 +260,7 @@ func (f *file) setHeader(field, value string) {
 	f.Header[field] = []string{value}
 }
 
-// A FileSetting can be used as an argument in Message.Attach or Message.Embed.
+// A FileSetting can be used as an argument in Envelope.Attach or Message.Embed.
 type FileSetting func(*file)
 
 // SetHeader is a file setting to set the MIME header of the message part that
@@ -295,7 +295,7 @@ func SetCopyFunc(f func(io.Writer) error) FileSetting {
 	}
 }
 
-func (m *Message) appendFile(list []*file, name string, settings []FileSetting) []*file {
+func (m *Envelope) appendFile(list []*file, name string, settings []FileSetting) []*file {
 	f := &file{
 		Name:   filepath.Base(name),
 		Header: make(map[string][]string),
@@ -324,23 +324,30 @@ func (m *Message) appendFile(list []*file, name string, settings []FileSetting) 
 }
 
 // Attach attaches the files to the email.
-func (m *Message) Attach(filename string, settings ...FileSetting) {
+func (m *Envelope) Attach(filename string, settings ...FileSetting) {
 	m.attachments = m.appendFile(m.attachments, filename, settings)
 }
 
 // Embed embeds the images to the email.
-func (m *Message) Embed(filename string, settings ...FileSetting) {
+func (m *Envelope) Embed(filename string, settings ...FileSetting) {
 	m.embedded = m.appendFile(m.embedded, filename, settings)
 }
 
 // WriteTo implements io.WriterTo. It dumps the whole message into w.
-func (m *Message) WriteTo(w io.Writer) (int64, error) {
+func (m *Envelope) WriteTo(w io.Writer) (int64, error) {
 	mw := &messageWriter{w: w}
 	mw.writeMessage(m)
 	return mw.n, mw.err
 }
 
-func (w *messageWriter) writeMessage(m *Message) {
+// Bytes renders and returns the envelope in byte form
+func (m *Envelope) Bytes() ([]byte, error) {
+	rawBuffer := bytes.NewBuffer(nil)
+	_, err := m.WriteTo(rawBuffer)
+	return rawBuffer.Bytes(), err
+}
+
+func (w *messageWriter) writeMessage(m *Envelope) {
 	if _, ok := m.header["Mime-Version"]; !ok {
 		w.writeString("Mime-Version: 1.0\r\n")
 	}
@@ -378,15 +385,15 @@ func (w *messageWriter) writeMessage(m *Message) {
 	}
 }
 
-func (m *Message) hasMixedPart() bool {
+func (m *Envelope) hasMixedPart() bool {
 	return (len(m.parts) > 0 && len(m.attachments) > 0) || len(m.attachments) > 1
 }
 
-func (m *Message) hasRelatedPart() bool {
+func (m *Envelope) hasRelatedPart() bool {
 	return (len(m.parts) > 0 && len(m.embedded) > 0) || len(m.embedded) > 1
 }
 
-func (m *Message) hasAlternativePart() bool {
+func (m *Envelope) hasAlternativePart() bool {
 	return len(m.parts) > 1
 }
 

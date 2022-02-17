@@ -5,20 +5,15 @@ import (
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/crholm/brev"
-	"github.com/crholm/brev/dkimx"
 	"github.com/crholm/brev/dnsx"
 	"github.com/crholm/brev/internal/config"
 	"github.com/crholm/brev/internal/dao"
 	"github.com/crholm/brev/internal/signals"
 	"github.com/crholm/brev/smtpx"
 	"github.com/crholm/brev/tools"
-	"io"
 	"sync"
 	"time"
 )
@@ -126,129 +121,18 @@ func worker(spool chan dao.SpoolEmail, db dao.DAO) {
 
 	workerId := tools.RandStringRunes(5)
 
-	dkimKey, err := loadDKIMKey()
-	if err != nil {
-		panic(err) // Probably a bad ide
-		return
-	}
-
 	fmt.Printf("[MTA-Worker %s]: Starting worker\n", workerId)
 	for spoolmail := range spool {
 
-		key, err := db.GetApiKey(spoolmail.ApiKey)
-		if err != nil {
-			fmt.Printf("[MTA-Worker %s] could not retrieve key settings for api key %s, err %v\n", workerId, spoolmail.ApiKey, err)
-			continue
-		}
+		content, err := db.GetEmailContent(spoolmail.MessageId)
 
-		/// Creating stmp message from brev mail, move to a marshal function in brev.Email ? ///
-		var brevmail brev.Email
-		err = json.Unmarshal(spoolmail.Content, &brevmail)
-		if err != nil {
-			fmt.Printf("[MTA-Worker %s] could not unmarshal email content for mail %s, err %v\n", workerId, spoolmail.MessageId, err)
-			continue
-		}
-		if brevmail.Headers == nil {
-			brevmail.Headers = map[string][]string{}
-		}
-		// Should this be moved to the ingress?
-		message := smtpx.NewMessage()
-
-		mxDomain := config.Get().MXDomain
-		if len(key.MxCNAME) > 3 {
-			mxDomain = key.MxCNAME
-		}
-		brevmail.Headers["Return-Path"] = []string{fmt.Sprintf("<bounces_%s@%s>", spoolmail.MessageId, mxDomain)}
-		brevmail.Headers["Message-ID"] = []string{fmt.Sprintf("<%s@%s>", spoolmail.MessageId, config.Get().Hostname)}
-		brevmail.Headers["Date"] = []string{time.Now().In(time.UTC).Format(smtpx.MessageDateFormat)}
-
-		for key, values := range brevmail.Headers {
-			message.SetHeader(key, values...)
-		}
-		message.SetHeader("From", message.FormatAddress(brevmail.From.Email, brevmail.From.Name))
-		for _, to := range brevmail.To {
-			message.AddToHeader("To", message.FormatAddress(to.Email, to.Name))
-		}
-		for _, cc := range brevmail.Cc {
-			message.AddToHeader("Cc", message.FormatAddress(cc.Email, cc.Name))
-		}
-		message.SetHeader("Subject", brevmail.Subject)
-
-		if brevmail.HTML != "" {
-			message.SetBody("text/html", brevmail.HTML)
-			if brevmail.Text != "" {
-				message.AddAlternative("text/plain", brevmail.Text)
-			}
-		}
-		if brevmail.HTML == "" && brevmail.Text != "" {
-			message.SetBody("text/plain", brevmail.Text)
-		}
-
-		for _, att := range brevmail.Attachments {
-			content, err := base64.StdEncoding.DecodeString(att.Content)
-			if err != nil {
-				fmt.Printf("[MTA-Worker %s] could not base64 decode attachement for %s, err %v\n", workerId, spoolmail.MessageId, err)
-				continue
-			}
-			message.Attach(att.Filename, smtpx.Rename(att.Filename), smtpx.SetCopyFunc(func(writer io.Writer) error {
-				_, err := io.Copy(writer, bytes.NewBuffer(content))
-				return err
-			}))
-		}
-
-		rawBuffer := bytes.NewBuffer(nil)
-		_, err = message.WriteTo(rawBuffer)
-		if err != nil {
-			fmt.Printf("[MTA-Worker %s] could not write mail to buffer %s, err %v\n", workerId, spoolmail.MessageId, err)
-			continue
-		}
-		rawMessage := rawBuffer.Bytes()
-
-		/// Signing email with DKIM
-		ops := dkimx.NewSigOptions()
-		ops.Canonicalization = "relaxed/relaxed"
-		ops.Domain = key.Domain
-		ops.Selector = config.Get().DKIMSelector
-		ops.Headers = []string{"from",
-			"mime-version",
-			"date",
-			"message-id",
-			"subject",
-			"content-type",
-			"return-path",
-		}
-		if len(brevmail.To) > 0 {
-			ops.Headers = append(ops.Headers, "to")
-		}
-		if len(brevmail.Cc) > 0 {
-			ops.Headers = append(ops.Headers, "cc")
-		}
-
-		err = dkimx.Sign(&rawMessage, ops, dkimKey)
-		if err != nil {
-			fmt.Printf("[MTA-Worker %s] could not dkim sign mail %s, err %v\n", workerId, spoolmail.MessageId, err)
-			continue
-		}
-
-		////// Figuring out recipients /////
-		var emails []string
-		for _, a := range brevmail.To {
-			emails = append(emails, a.Email)
-		}
-		for _, a := range brevmail.Cc {
-			emails = append(emails, a.Email)
-		}
-		for _, a := range brevmail.Bcc {
-			emails = append(emails, a.Email)
-		}
-
-		transferlist := dnsx.LookupEmailMX(emails)
+		transferlist := dnsx.LookupEmailMX(spoolmail.Recipients)
 		if err != nil {
 			fmt.Printf("[MTA-Worker %s] could not look up TransferList server for recipiants of mail %s, err %v\n", workerId, spoolmail.MessageId, err)
 			continue
 		}
 
-		fmt.Printf("\n%+v\n", transferlist)
+		fmt.Printf("\nTransferlist%+v\n", transferlist)
 
 		for _, mx := range transferlist {
 			if len(mx.MXServers) == 0 {
@@ -256,13 +140,35 @@ func worker(spool chan dao.SpoolEmail, db dao.DAO) {
 				continue
 			}
 			addr := mx.MXServers[0] + ":25"
-			fmt.Printf("[MTA-Worker %s]: Transferring emails to %s domain through %s\n", workerId, mx.Domain, addr)
-			err = smtpx.SendMail(addr, nil, brevmail.From.Email, mx.Emails, bytes.NewBuffer(rawMessage))
+
+			start := time.Now()
+			fmt.Printf("[MTA-Worker %s]: opening connection to %v, ", workerId, addr)
+			conn, err := smtpx.NewConnection(addr, nil)
+			fmt.Printf("took %v\n", time.Now().Sub(start))
 			if err != nil {
-				fmt.Printf("[MTA-Worker %s]: could not transfer mail to %s for mail %s\n", workerId, addr, spoolmail.MessageId)
+				fmt.Printf("[MTA-Worker %s]: could not establis connection to mx server %s for %v, err %v\n", workerId, addr, mx.Emails, err)
 				continue
 			}
+
+			for _, mailaddr := range mx.Emails {
+				start = time.Now()
+				fmt.Printf("[MTA-Worker %s]: Transferring emails to %s domain through %s for %s, ", workerId, mx.Domain, addr, mailaddr)
+				err = conn.SendMail(spoolmail.From, []string{mailaddr}, bytes.NewBuffer(content))
+				fmt.Printf("took %v\n", time.Now().Sub(start))
+				if err != nil {
+					fmt.Printf("[MTA-Worker %s]: could not transfer mail to %s for mail %s to %s, err %v\n", workerId, addr, spoolmail.MessageId, mailaddr, err)
+					continue
+				}
+			}
 			fmt.Printf("[MTA-Worker %s]: Transfer compleat for mail %s\n", workerId, spoolmail.MessageId)
+			start = time.Now()
+			fmt.Printf("[MTA-Worker %s]: cloasing connection to %v", workerId, addr)
+			err = conn.Close()
+			fmt.Printf("took %v\n", time.Now().Sub(start))
+			if err != nil {
+				fmt.Printf("[MTA-Worker %s]: failing to cloase connetion to %s, err %v\n", workerId, addr, err)
+				continue
+			}
 		}
 
 	}
