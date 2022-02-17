@@ -1,1 +1,7 @@
 .idea
+brev.sqlite
+brev.sqlite-shm
+brev.sqlite-wal
+dkim-private.pem
+dkim-pub.txt
+run.sh

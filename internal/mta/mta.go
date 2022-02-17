@@ -3,13 +3,9 @@ package mta
 import (
 	"bytes"
 	"context"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"github.com/crholm/brev/dnsx"
-	"github.com/crholm/brev/internal/config"
 	"github.com/crholm/brev/internal/dao"
 	"github.com/crholm/brev/internal/signals"
 	"github.com/crholm/brev/smtpx"
@@ -20,62 +16,70 @@ import (
 
 // Mail Transfer Agent
 
-func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
-	fmt.Println("[MTA]: Starting MTA")
-	done = make(chan interface{})
-	once := sync.Once{}
-	closer := func() {
-		once.Do(func() {
-			close(done)
-		})
+func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer smtpx.Dialer) *MTA {
+	done := make(chan interface{})
+	m := &MTA{
+		done:          done,
+		ctx:           ctx,
+		db:            db,
+		emailMxLookup: emailMxLookup,
+		smtpDialer:    dialer,
+		closer: func() func() {
+			once := sync.Once{}
+			return func() {
+				once.Do(func() {
+					close(done)
+				})
+			}
+		}(),
 	}
+	return m
+}
 
+type MTA struct {
+	done          chan interface{}
+	ctx           context.Context
+	db            dao.DAO
+	emailMxLookup dnsx.MXLookup
+	smtpDialer    smtpx.Dialer
+	closer        func()
+}
+
+func (m *MTA) Done() <-chan interface{} {
+	return m.done
+}
+func (m *MTA) Stop() {
+	m.closer()
+}
+
+func (m *MTA) Start(workers int) {
+	fmt.Println("[MTA]: Starting MTA")
 	go func() {
-		err := startMTA(ctx, db)
+		err := m.start(workers)
 		if err != nil {
 			fmt.Println("[MTA]: got error from return", err)
 		}
-		closer()
+		m.closer()
 	}()
 
-	return done
 }
+func (m *MTA) start(workers int) error {
 
-func loadDKIMKey() (*rsa.PrivateKey, error) {
-	d, _ := pem.Decode([]byte(config.Get().DKIMPrivetKey))
-	if d == nil {
-		return nil, errors.New("could not decode private dkim key from config")
-	}
-	// try to parse it as PKCS1 otherwise try PKCS8
-	var privateKey *rsa.PrivateKey
-	if key, err := x509.ParsePKCS1PrivateKey(d.Bytes); err != nil {
-		if key, err := x509.ParsePKCS8PrivateKey(d.Bytes); err != nil {
-			return nil, errors.New("found no standard to decode private dkim key")
-		} else {
-			privateKey = key.(*rsa.PrivateKey)
-		}
-	} else {
-		privateKey = key
-	}
-	privateKey.Precompute()
-	return privateKey, nil
-}
-
-func startMTA(ctx context.Context, db dao.DAO) error {
-
-	done := make(chan interface{})
+	localDone := make(chan interface{})
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-m.ctx.Done():
+		case <-m.done:
+		}
+
 		fmt.Println("[MTA]: Shutting down mta server")
-		close(done)
+		close(localDone)
 	}()
 
-	size := config.Get().Workers
+	spool := make(chan dao.SpoolEmail, workers*2)
 
-	spool := make(chan dao.SpoolEmail, size*2)
-
-	for i := 0; i < size; i++ {
-		go worker(spool, db)
+	for i := 0; i < workers; i++ {
+		go m.worker(spool)
 	}
 
 	newMailInSpool, cancel := signals.Listen(signals.NewMailInSpool)
@@ -83,7 +87,7 @@ func startMTA(ctx context.Context, db dao.DAO) error {
 
 	for {
 
-		emails, err := db.GetQueuedEmails(size * 2)
+		emails, err := m.db.GetQueuedEmails(workers * 2)
 
 		if err != nil {
 			fmt.Println(err)
@@ -94,7 +98,7 @@ func startMTA(ctx context.Context, db dao.DAO) error {
 		}
 
 		for _, email := range emails {
-			err := db.ClaimEmail(email.MessageId)
+			err := m.db.ClaimEmail(email.MessageId)
 			if err != nil {
 				fmt.Printf("could not claim email %s, %v\n", email.MessageId, err)
 				continue
@@ -110,23 +114,23 @@ func startMTA(ctx context.Context, db dao.DAO) error {
 		select {
 		case <-time.After(10 * time.Second):
 		case <-newMailInSpool: // Wakeup signal form ingress
-		case <-done:
+		case <-localDone:
 			return errors.New("mta ordered shutdown from context")
 		}
 
 	}
 }
 
-func worker(spool chan dao.SpoolEmail, db dao.DAO) {
+func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 	workerId := tools.RandStringRunes(5)
 
 	fmt.Printf("[MTA-Worker %s]: Starting worker\n", workerId)
 	for spoolmail := range spool {
 
-		content, err := db.GetEmailContent(spoolmail.MessageId)
+		content, err := m.db.GetEmailContent(spoolmail.MessageId)
 
-		transferlist := dnsx.LookupEmailMX(spoolmail.Recipients)
+		transferlist := m.emailMxLookup(spoolmail.Recipients)
 		if err != nil {
 			fmt.Printf("[MTA-Worker %s] could not look up TransferList server for recipiants of mail %s, err %v\n", workerId, spoolmail.MessageId, err)
 			continue
@@ -143,7 +147,7 @@ func worker(spool chan dao.SpoolEmail, db dao.DAO) {
 
 			start := time.Now()
 			fmt.Printf("[MTA-Worker %s]: opening connection to %v, ", workerId, addr)
-			conn, err := smtpx.NewConnection(addr, nil)
+			conn, err := m.smtpDialer(addr, nil)
 			fmt.Printf("took %v\n", time.Now().Sub(start))
 			if err != nil {
 				fmt.Printf("[MTA-Worker %s]: could not establis connection to mx server %s for %v, err %v\n", workerId, addr, mx.Emails, err)

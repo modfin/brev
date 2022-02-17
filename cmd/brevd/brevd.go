@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"github.com/crholm/brev/dnsx"
 	"github.com/crholm/brev/internal/api"
 	"github.com/crholm/brev/internal/config"
 	"github.com/crholm/brev/internal/dao"
 	"github.com/crholm/brev/internal/mta"
+	"github.com/crholm/brev/smtpx"
 	"golang.org/x/net/context"
 	"os"
 	"os/signal"
@@ -27,7 +29,8 @@ func main() {
 	}
 
 	apiDone := api.Init(ctx, db)
-	mtaDone := mta.Init(ctx, db)
+	transferAgent := mta.New(ctx, db, dnsx.LookupEmailMX, smtpx.NewConnection)
+	transferAgent.Start(5)
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc,
@@ -41,7 +44,7 @@ func main() {
 		fmt.Println("SIGNAL:", sig.String())
 	case <-apiDone:
 		fmt.Println("[Brev]: Unexpected closing of api server")
-	case <-mtaDone:
+	case <-transferAgent.Done():
 		fmt.Println("[Brev]: Unexpected closing of mta server")
 	}
 

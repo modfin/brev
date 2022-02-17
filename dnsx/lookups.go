@@ -13,6 +13,8 @@ type TransferList struct {
 	Err       error
 }
 
+type MXLookup func(emails []string) []TransferList
+
 func LookupEmailMX(emails []string) []TransferList {
 	var mx []TransferList
 
