@@ -414,6 +414,7 @@ func NewConnection(addr string, a Auth) (Connection, error) {
 	return c, nil
 }
 
+// TODO return logs...
 func (c *connection) SendMail(from string, to []string, msg io.WriterTo) error {
 	var err error
 	if err = validateLine(from); err != nil {

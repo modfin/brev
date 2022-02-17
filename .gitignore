@@ -2,6 +2,6 @@
 brev.sqlite
 brev.sqlite-shm
 brev.sqlite-wal
-dkim-private.pem
-dkim-pub.txt
+dkim-private.*
+dkim-pub.*
 run.sh

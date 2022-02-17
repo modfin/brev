@@ -9,6 +9,7 @@ import (
 	"github.com/crholm/brev/internal/dao"
 	"github.com/crholm/brev/internal/signals"
 	"github.com/crholm/brev/smtpx"
+	"github.com/crholm/brev/smtpx/pool"
 	"github.com/crholm/brev/tools"
 	"sync"
 	"time"
@@ -23,7 +24,8 @@ func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer sm
 		ctx:           ctx,
 		db:            db,
 		emailMxLookup: emailMxLookup,
-		smtpDialer:    dialer,
+		//smtpDialer:    dialer,
+		pool: pool.New(dialer, 2),
 		closer: func() func() {
 			once := sync.Once{}
 			return func() {
@@ -41,8 +43,9 @@ type MTA struct {
 	ctx           context.Context
 	db            dao.DAO
 	emailMxLookup dnsx.MXLookup
-	smtpDialer    smtpx.Dialer
-	closer        func()
+	//smtpDialer    smtpx.Dialer
+	pool   *pool.Pool
+	closer func()
 }
 
 func (m *MTA) Done() <-chan interface{} {
@@ -129,14 +132,15 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 	for spoolmail := range spool {
 
 		content, err := m.db.GetEmailContent(spoolmail.MessageId)
-
+		if err != nil {
+			fmt.Printf("[MTA-Worker %s] could not retrive raw content of mail %s, err %v\n", workerId, spoolmail.MessageId, err)
+			continue
+		}
 		transferlist := m.emailMxLookup(spoolmail.Recipients)
 		if err != nil {
 			fmt.Printf("[MTA-Worker %s] could not look up TransferList server for recipiants of mail %s, err %v\n", workerId, spoolmail.MessageId, err)
 			continue
 		}
-
-		fmt.Printf("\nTransferlist%+v\n", transferlist)
 
 		for _, mx := range transferlist {
 			if len(mx.MXServers) == 0 {
@@ -146,31 +150,10 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 			addr := mx.MXServers[0] + ":25"
 
 			start := time.Now()
-			fmt.Printf("[MTA-Worker %s]: opening connection to %v, ", workerId, addr)
-			conn, err := m.smtpDialer(addr, nil)
-			fmt.Printf("took %v\n", time.Now().Sub(start))
+			err = m.pool.SendMail(addr, spoolmail.From, mx.Emails, bytes.NewBuffer(content))
+			fmt.Printf("[MTA-Worker %s]: Transferred emails to %s domain through %s for %v, took %v\n", workerId, mx.Domain, addr, mx.Emails, time.Since(start))
 			if err != nil {
-				fmt.Printf("[MTA-Worker %s]: could not establis connection to mx server %s for %v, err %v\n", workerId, addr, mx.Emails, err)
-				continue
-			}
-
-			for _, mailaddr := range mx.Emails {
-				start = time.Now()
-				fmt.Printf("[MTA-Worker %s]: Transferring emails to %s domain through %s for %s, ", workerId, mx.Domain, addr, mailaddr)
-				err = conn.SendMail(spoolmail.From, []string{mailaddr}, bytes.NewBuffer(content))
-				fmt.Printf("took %v\n", time.Now().Sub(start))
-				if err != nil {
-					fmt.Printf("[MTA-Worker %s]: could not transfer mail to %s for mail %s to %s, err %v\n", workerId, addr, spoolmail.MessageId, mailaddr, err)
-					continue
-				}
-			}
-			fmt.Printf("[MTA-Worker %s]: Transfer compleat for mail %s\n", workerId, spoolmail.MessageId)
-			start = time.Now()
-			fmt.Printf("[MTA-Worker %s]: cloasing connection to %v", workerId, addr)
-			err = conn.Close()
-			fmt.Printf("took %v\n", time.Now().Sub(start))
-			if err != nil {
-				fmt.Printf("[MTA-Worker %s]: failing to cloase connetion to %s, err %v\n", workerId, addr, err)
+				fmt.Printf("[MTA-Worker %s]: Faild transfer of emails to %s domain through %s for %v, err %v\n", workerId, mx.Domain, spoolmail.Recipients, time.Since(start), err)
 				continue
 			}
 		}

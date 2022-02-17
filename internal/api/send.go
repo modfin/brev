@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/crholm/brev"
-	"github.com/crholm/brev/internal/config"
 	"github.com/crholm/brev/internal/dao"
 	"github.com/crholm/brev/internal/signals"
 	"github.com/crholm/brev/smtpx/dkim"
@@ -72,11 +71,11 @@ func validateContent(email *brev.Email) error {
 	return nil
 }
 
-func newMessageId() string {
-	return fmt.Sprintf("%s=%s", uuid.New().String(), config.Get().Hostname)
+func newMessageId(hostname string) string {
+	return fmt.Sprintf("%s=%s", uuid.New().String(), hostname)
 }
 
-func EnqueueMTA(db dao.DAO, signer *dkim.Signer) echo.HandlerFunc {
+func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname string, defaultMXDomain string) echo.HandlerFunc {
 
 	return func(c echo.Context) error {
 
@@ -111,15 +110,15 @@ func EnqueueMTA(db dao.DAO, signer *dkim.Signer) echo.HandlerFunc {
 			return err
 		}
 
-		var messageId = newMessageId()
+		var messageId = newMessageId(hostname)
 
 		// Set default headers
-		mxDomain := config.Get().MXDomain
+		mxDomain := defaultMXDomain
 		if len(key.MxCNAME) > 3 {
 			mxDomain = key.MxCNAME
 		}
 		email.Headers["Return-Path"] = []string{fmt.Sprintf("<bounces_%s@%s>", messageId, mxDomain)}
-		email.Headers["Message-ID"] = []string{fmt.Sprintf("<%s@%s>", messageId, config.Get().Hostname)}
+		email.Headers["Message-Id"] = []string{fmt.Sprintf("<%s@%s>", messageId, hostname)}
 		email.Headers["Date"] = []string{time.Now().In(time.UTC).Format(envelope.MessageDateFormat)}
 
 		spoolmail := dao.SpoolEmail{
@@ -131,7 +130,7 @@ func EnqueueMTA(db dao.DAO, signer *dkim.Signer) echo.HandlerFunc {
 
 		localSigner := signer.
 			With(dkim.OpDomain(key.Domain)).
-			With(dkim.OpSelector(config.Get().DKIMSelector))
+			With(dkim.OpSelector(dkimSelector))
 
 		content, err := envelope.MarshalFromEmail(email, localSigner)
 		if err != nil {

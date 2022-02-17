@@ -29,6 +29,11 @@ func MarshalFromEmail(e *brev.Email, signer *dkim.Signer) ([]byte, error) {
 			return nil, err
 		}
 		for header, _ := range headers {
+			// Apparently Outlook arbitrarily replaces return-path and then validate dkim signatures
+			// Hey, the signature does not match when we changed content... Surprise, Surprise
+			if strings.ToLower(header) == "return-path" {
+				continue
+			}
 			signer = signer.With(dkim.OpAddHeader(strings.ToLower(header)))
 		}
 		err = signer.Sign(&b)

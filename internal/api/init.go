@@ -34,7 +34,8 @@ func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
 	prom := prometheus.NewPrometheus("echo", nil)
 	e.Use(middleware.Logger(), prom.HandlerFunc)
 
-	e.POST("/mta", EnqueueMTA(db, signer))
+	cfg := config.Get()
+	e.POST("/mta", EnqueueMTA(db, cfg.DKIMSelector, signer, cfg.Hostname, cfg.MXDomain))
 	//e.GET("/mta")            // returns list of sent emails
 	//e.GET("/mta/:messageId") // returns log of specific email
 

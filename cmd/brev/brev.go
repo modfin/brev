@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/crholm/brev/dnsx"
 	"github.com/crholm/brev/smtpx"
+	"github.com/crholm/brev/smtpx/envelope"
 	"github.com/crholm/brev/tools"
 	"github.com/urfave/cli/v2"
 	"os"
@@ -162,7 +163,7 @@ func sendmail(c *cli.Context) (err error) {
 	msaUser := c.String("msa-user")
 	msaPass := c.String("msa-pass")
 
-	message := smtpx.NewMessage()
+	message := envelope.NewEnvelope()
 
 	if len(from) == 0 {
 		from, err = tools.SystemUri()
