@@ -13,7 +13,9 @@ type DAO interface {
 	GetApiKey(key string) (*ApiKey, error)
 	AddEmailToSpool(email SpoolEmail, content []byte) error
 	GetQueuedEmails(count int) (emails []SpoolEmail, err error)
-	ClaimEmail(id string) error
+	ClaimEmail(messageId string) error
+	UpdateEmailBrevStatus(messageId string, statusBrev string) error
+	//UpdateEmailSmtpStatus(id string, statusBrev string) error
 	GetEmailContent(messageId string) ([]byte, error)
 }
 
@@ -26,6 +28,33 @@ func NewSQLite(path string) (DAO, error) {
 type sqlite struct {
 	db   *sqlx.DB
 	path string
+}
+
+func (s *sqlite) UpdateEmailBrevStatus(messageId string, statusBrev string) error {
+	q := `
+		UPDATE spool
+		SET status_brev = ?
+		WHERE message_id = ?
+	`
+	var err error
+	var tx *sqlx.Tx
+	tx, err = s.getTX()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == nil {
+			err = tx.Commit()
+			return
+		}
+		_ = tx.Rollback()
+	}()
+
+	_, err = tx.Exec(q, statusBrev, messageId)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *sqlite) ClaimEmail(messageId string) (err error) {

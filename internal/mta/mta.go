@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// Mail Transfer Agent
+// Mail Transfer Agent, sending mails to where ever they should go
 
 func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer smtpx.Dialer) *MTA {
 	done := make(chan interface{})
@@ -157,6 +157,10 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 				continue
 			}
 		}
-
+		err = m.db.UpdateEmailBrevStatus(spoolmail.MessageId, "sent")
+		if err != nil {
+			fmt.Printf("[MTA-Worker %s]: could not update status to sent for %s, err %v\n", workerId, spoolmail.MessageId, err)
+			continue
+		}
 	}
 }

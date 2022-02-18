@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"mime"
+	"strings"
 )
 
 func NewEmail() *Email {
@@ -12,15 +13,52 @@ func NewEmail() *Email {
 	}
 }
 
+type Headers map[string][]string
+
+func (h Headers) keyOf(key string) string {
+	key = strings.ToLower(key)
+	for candidate := range h {
+		if strings.ToLower(candidate) == key {
+			return candidate
+		}
+	}
+	return key
+}
+func (h Headers) Has(key string) bool {
+	key = h.keyOf(key)
+	return len(h[key]) > 0
+}
+
+func (h Headers) Set(key string, value []string) {
+	key = h.keyOf(key)
+	h[key] = value
+}
+func (h Headers) Add(key string, value string) {
+	key = h.keyOf(key)
+	h[key] = append(h[key], value)
+}
+func (h Headers) Get(key string) []string {
+	key = h.keyOf(key)
+	return h[key]
+}
+func (h Headers) GetFirst(key string) string {
+	key = h.keyOf(key)
+	values := h[key]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
 type Email struct {
-	Headers map[string][]string `json:"headers"`
-	From    Address             `json:"from"`
-	To      []Address           `json:"to"`
-	Cc      []Address           `json:"cc"`
-	Bcc     []Address           `json:"bcc"`
-	Subject string              `json:"subject"`
-	HTML    string              `json:"html"`
-	Text    string              `json:"text"`
+	Headers Headers   `json:"headers"`
+	From    Address   `json:"from"`
+	To      []Address `json:"to"`
+	Cc      []Address `json:"cc"`
+	Bcc     []Address `json:"bcc"`
+	Subject string    `json:"subject"`
+	HTML    string    `json:"html"`
+	Text    string    `json:"text"`
 
 	Attachments []Attachment `json:"attachments"`
 }

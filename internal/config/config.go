@@ -8,11 +8,11 @@ import (
 
 type Config struct {
 	MXDomain string `env:"BREV_MX_DOMAIN"` // used to find out what mx servers being used, eg brev.cc
-	Hostname string `env:"BREV_HOSTNAME"`  // hostname of this particular mx node, eg mx0.brev.cc
+	MXPort   int    `env:"BREV_MX_PORT" envDefault:"25"`
+
+	Hostname string `env:"BREV_HOSTNAME"` // hostname of this particular mx node, eg mx0.brev.cc
 
 	HttpPort int `env:"BREV_HTTP_PORT"`
-
-	SMTPPort int `env:"BREV_SMTP_PORT"`
 
 	DbURI string `env:"BREV_DB_URI" envDefault:"./brev.sqlite"`
 

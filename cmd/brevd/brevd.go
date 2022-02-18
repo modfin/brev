@@ -6,6 +6,7 @@ import (
 	"github.com/crholm/brev/internal/api"
 	"github.com/crholm/brev/internal/config"
 	"github.com/crholm/brev/internal/dao"
+	"github.com/crholm/brev/internal/msa"
 	"github.com/crholm/brev/internal/mta"
 	"github.com/crholm/brev/smtpx"
 	"golang.org/x/net/context"
@@ -29,6 +30,13 @@ func main() {
 	}
 
 	apiDone := api.Init(ctx, db)
+	_, err = msa.New(ctx, db, config.Get())
+	if err != nil {
+		fmt.Println("could not start MSA", cfg.DbURI)
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
 	transferAgent := mta.New(ctx, db, dnsx.LookupEmailMX, smtpx.NewConnection)
 	transferAgent.Start(5)
 

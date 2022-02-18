@@ -117,14 +117,16 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 		if len(key.MxCNAME) > 3 {
 			mxDomain = key.MxCNAME
 		}
-		email.Headers["Return-Path"] = []string{fmt.Sprintf("<bounces_%s@%s>", messageId, mxDomain)}
 		email.Headers["Message-Id"] = []string{fmt.Sprintf("<%s@%s>", messageId, hostname)}
-		email.Headers["Date"] = []string{time.Now().In(time.UTC).Format(envelope.MessageDateFormat)}
+		if !email.Headers.Has("Date") {
+			email.Headers.Add("Date", time.Now().In(time.UTC).Format(envelope.MessageDateFormat))
+		}
 
+		returnPath := fmt.Sprintf("bounces_%s@%s", messageId, mxDomain)
 		spoolmail := dao.SpoolEmail{
 			MessageId:  messageId,
 			ApiKey:     key.Key,
-			From:       email.From.Email,
+			From:       returnPath, // From here is used in the smtp process and the return-path will be added by the receiver
 			Recipients: email.Recipients(),
 		}
 
