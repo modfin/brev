@@ -3,8 +3,8 @@
 
 ## Install
 ```bash
-go get github.com/modfin/cmd/brev
-go get github.com/modfin/cmd/brevd
+go get github.com/modfin/brev/cmd/brev
+go get github.com/modfin/brev/cmd/brevd
 ```
 
 ## Brevd Usage
@@ -46,6 +46,8 @@ dig TXT brev.cc
 brev.cc.                300     IN      TXT     "v=spf1 mx -all"
 ```
 
+Finally, set up PTR records through your ISP, eg 1.2.3.4 -> mx0.brev.cc 
+
 #### Client DNS Config
 Say you now want send your emails and have them come from `no-reply@example.com`
 
@@ -75,13 +77,14 @@ Create a run script that configures the environment for you
 
 ```bash 
 cat ./run-brevd.sh
+export BREV_HOSTNAME=mx0.brev.cc
+export BREV_DB_URI=$(pwd)/brev.sqlite
+
 export BREV_MX_DOMAIN=brev.cc
 export BREV_MX_PORT=25
 
 export BREV_DKIM_SELECTOR=brev
-export BREV_HOSTNAME=mx0.brev.cc
-export BREV_DB_URI=$(pwd)/brev.sqlite
-export BREV_DKIM_PRIVATE_KEY=dkim-private.pem
+export BREV_DKIM_PRIVATE_KEY=./path/to/dkim-private.pem
 brevd
 ```
 
