@@ -1,4 +1,4 @@
-module github.com/crholm/brev
+module github.com/modfin/brev
 
 go 1.16
 

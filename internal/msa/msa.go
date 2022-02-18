@@ -3,11 +3,11 @@ package msa
 import (
 	"context"
 	"fmt"
-	"github.com/crholm/brev/internal/config"
-	"github.com/crholm/brev/internal/dao"
 	"github.com/flashmob/go-guerrilla"
 	"github.com/flashmob/go-guerrilla/backends"
 	"github.com/flashmob/go-guerrilla/mail"
+	"github.com/modfin/brev/internal/config"
+	"github.com/modfin/brev/internal/dao"
 	"regexp"
 )
 

@@ -1,7 +1,7 @@
 package dnsx
 
 import (
-	"github.com/crholm/brev/tools"
+	"github.com/modfin/brev/tools"
 	"net"
 	"sort"
 )

@@ -3,12 +3,12 @@ package api
 import (
 	"context"
 	"fmt"
-	"github.com/crholm/brev/internal/config"
-	"github.com/crholm/brev/internal/dao"
-	"github.com/crholm/brev/smtpx/dkim"
 	"github.com/labstack/echo-contrib/prometheus"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/modfin/brev/internal/config"
+	"github.com/modfin/brev/internal/dao"
+	"github.com/modfin/brev/smtpx/dkim"
 	"sync"
 	"time"
 )

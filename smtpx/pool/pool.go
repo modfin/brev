@@ -2,8 +2,8 @@ package pool
 
 import (
 	"fmt"
-	"github.com/crholm/brev/smtpx"
-	"github.com/crholm/brev/tools"
+	"github.com/modfin/brev/smtpx"
+	"github.com/modfin/brev/tools"
 	"io"
 	"math/rand"
 	"sync"
