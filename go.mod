@@ -14,5 +14,4 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.11
 	github.com/stretchr/testify v1.7.0
 	github.com/urfave/cli/v2 v2.3.0
-	golang.org/x/net v0.0.0-20210917221730-978cfadd31cf
 )

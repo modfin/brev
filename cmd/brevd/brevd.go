@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"github.com/modfin/brev/dnsx"
 	"github.com/modfin/brev/internal/api"
@@ -9,7 +10,6 @@ import (
 	"github.com/modfin/brev/internal/msa"
 	"github.com/modfin/brev/internal/mta"
 	"github.com/modfin/brev/smtpx"
-	"golang.org/x/net/context"
 	"os"
 	"os/signal"
 	"syscall"
