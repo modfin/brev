@@ -37,7 +37,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	transferAgent := mta.New(ctx, db, dnsx.LookupEmailMX, smtpx.NewConnection)
+	transferAgent := mta.New(ctx, db, dnsx.LookupEmailMX, smtpx.NewConnection, cfg.Hostname)
 	transferAgent.Start(5)
 
 	sigc := make(chan os.Signal, 1)

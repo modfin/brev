@@ -10,8 +10,9 @@ import (
 	"time"
 )
 
-func New(dialer smtpx.Dialer, concurrency int) *Pool {
+func New(dialer smtpx.Dialer, concurrency int, localName string) *Pool {
 	p := &Pool{
+		localName:   localName,
 		concurrency: concurrency,
 		dialer:      dialer,
 		connections: map[string]*connections{},
@@ -21,6 +22,7 @@ func New(dialer smtpx.Dialer, concurrency int) *Pool {
 }
 
 type Pool struct {
+	localName   string
 	concurrency int
 	dialer      smtpx.Dialer
 	lock        sync.RWMutex
@@ -74,7 +76,7 @@ func (p *Pool) cleaner() {
 	}
 }
 
-func (p *Pool) SendMail(addr string, from string, to []string, msg io.WriterTo) error {
+func (p *Pool) SendMail(logger smtpx.Logger, addr string, from string, to []string, msg io.WriterTo) error {
 	p.lock.RLock()
 	defer p.lock.RUnlock()
 	conn := p.connections[addr]
@@ -82,7 +84,7 @@ func (p *Pool) SendMail(addr string, from string, to []string, msg io.WriterTo) 
 		p.lock.RUnlock()
 		p.addLock.Lock()
 		if p.connections[addr] == nil {
-			conn = newConnections(addr, p.dialer, p.concurrency)
+			conn = newConnections(addr, p.dialer, p.concurrency, p.localName)
 			p.connections[addr] = conn
 			fmt.Printf("[Pool]: added pool for %s\n", addr)
 		}
@@ -90,24 +92,26 @@ func (p *Pool) SendMail(addr string, from string, to []string, msg io.WriterTo) 
 		p.lock.RLock()
 	}
 
-	return conn.sendMail(from, to, msg)
+	return conn.sendMail(logger, from, to, msg)
 }
 
-func newConnections(addr string, dialer smtpx.Dialer, concurrency int) *connections {
+func newConnections(addr string, dialer smtpx.Dialer, concurrency int, localName string) *connections {
 	c := &connections{
+		localName:   localName,
 		concurrency: concurrency,
 		addr:        addr,
 		dialer:      dialer,
 	}
 
 	for i := 0; i < concurrency; i++ {
-		c.connections = append(c.connections, newConnection(addr, dialer))
+		c.connections = append(c.connections, newConnection(addr, dialer, localName))
 	}
 
 	return c
 }
 
 type connections struct {
+	localName   string
 	concurrency int
 	addr        string
 	dialer      smtpx.Dialer
@@ -115,34 +119,36 @@ type connections struct {
 	connections []*connection
 }
 
-func (c *connections) sendMail(from string, to []string, msg io.WriterTo) error {
+func (c *connections) sendMail(logger smtpx.Logger, from string, to []string, msg io.WriterTo) error {
 	con := c.connections[rand.Intn(len(c.connections))] // Avoid locking for roundrobin stuff
-	return con.sendMail(from, to, msg)
+	return con.sendMail(logger, from, to, msg)
 }
 
-func newConnection(addr string, dialer smtpx.Dialer) *connection {
+func newConnection(addr string, dialer smtpx.Dialer, localName string) *connection {
 	return &connection{
-		id:     tools.RandStringRunes(8),
-		addr:   addr,
-		dialer: dialer,
+		localName: localName,
+		id:        tools.RandStringRunes(8),
+		addr:      addr,
+		dialer:    dialer,
 	}
 }
 
 type connection struct {
 	id          string
 	addr        string
+	localName   string
 	dialer      smtpx.Dialer
 	conn        smtpx.Connection
 	lastMessage time.Time
 	mu          sync.Mutex
 }
 
-func (c *connection) connect() error {
+func (c *connection) connect(logger smtpx.Logger) error {
 	// TODO figure out if im still connected and reconnect if not...
 	var err error
 	if c.conn == nil {
 		start := time.Now()
-		c.conn, err = c.dialer(c.addr, nil)
+		c.conn, err = c.dialer(logger, c.addr, c.localName, nil)
 		fmt.Printf("[Pool-conn %s]: connection to %s, took %v\n", c.id, c.addr, time.Since(start))
 		if err != nil {
 			return err
@@ -151,19 +157,19 @@ func (c *connection) connect() error {
 	return err
 }
 
-func (c *connection) sendMail(from string, to []string, msg io.WriterTo) error {
+func (c *connection) sendMail(logger smtpx.Logger, from string, to []string, msg io.WriterTo) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var err error
 
-	err = c.connect()
+	err = c.connect(logger)
 	if err != nil {
 		fmt.Printf("[Pool-conn %s]: error while connecting to %s, %v\n", c.id, c.addr, err)
 		return err
 	}
 
 	start := time.Now()
-	err = c.conn.SendMail(from, to, msg)
+	err = c.conn.SendMail(logger, from, to, msg)
 	fmt.Printf("[Pool-conn %s]: Sent email thorugh %s, took %v\n", c.id, c.addr, time.Since(start))
 	if err != nil {
 		fmt.Printf("[Pool-conn %s]: error while sending email, %v\n", c.id, err)

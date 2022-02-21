@@ -48,25 +48,25 @@ type Client struct {
 
 // Dial returns a new Client connected to an SMTP server at addr.
 // The addr must include a port, as in "mail.example.com:smtp".
-func Dial(addr string) (*Client, error) {
+func Dial(addr string, localName string) (*Client, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	host, _, _ := net.SplitHostPort(addr)
-	return NewClient(conn, host)
+	return NewClient(conn, host, localName)
 }
 
 // NewClient returns a new Client using an existing connection and host as a
 // server name to be used when authenticating.
-func NewClient(conn net.Conn, host string) (*Client, error) {
+func NewClient(conn net.Conn, host string, localName string) (*Client, error) {
 	text := textproto.NewConn(conn)
 	_, _, err := text.ReadResponse(220)
 	if err != nil {
 		text.Close()
 		return nil, err
 	}
-	c := &Client{Text: text, conn: conn, serverName: host, localName: "localhost"}
+	c := &Client{Text: text, conn: conn, serverName: host, localName: localName}
 	_, c.tls = conn.(*tls.Conn)
 	return c, nil
 }
@@ -77,12 +77,12 @@ func (c *Client) Close() error {
 }
 
 // hello runs a hello exchange if needed.
-func (c *Client) hello() error {
+func (c *Client) hello(logger Logger) error {
 	if !c.didHello {
 		c.didHello = true
-		err := c.ehlo()
+		err := c.ehlo(logger)
 		if err != nil {
-			c.helloError = c.helo()
+			c.helloError = c.helo(logger)
 		}
 	}
 	return c.helloError
@@ -93,7 +93,7 @@ func (c *Client) hello() error {
 // over the host name used. The client will introduce itself as "localhost"
 // automatically otherwise. If Hello is called, it must be called before
 // any of the other methods.
-func (c *Client) Hello(localName string) error {
+func (c *Client) Hello(logger Logger, localName string) error {
 	if err := validateLine(localName); err != nil {
 		return err
 	}
@@ -101,11 +101,16 @@ func (c *Client) Hello(localName string) error {
 		return errors.New("smtp: Hello called after other methods")
 	}
 	c.localName = localName
-	return c.hello()
+	return c.hello(logger)
 }
 
 // cmd is a convenience function that sends a command and returns the response
-func (c *Client) cmd(expectCode int, format string, args ...interface{}) (int, string, error) {
+func (c *Client) cmd(logger Logger, expectCode int, format string, args ...interface{}) (int, string, error) {
+
+	if logger != nil {
+		logger.Logf("> "+format, args...)
+	}
+
 	id, err := c.Text.Cmd(format, args...)
 	if err != nil {
 		return 0, "", err
@@ -113,21 +118,24 @@ func (c *Client) cmd(expectCode int, format string, args ...interface{}) (int, s
 	c.Text.StartResponse(id)
 	defer c.Text.EndResponse(id)
 	code, msg, err := c.Text.ReadResponse(expectCode)
+	if logger != nil {
+		logger.Logf("< %d: %s", code, msg)
+	}
 	return code, msg, err
 }
 
 // helo sends the HELO greeting to the server. It should be used only when the
 // server does not support ehlo.
-func (c *Client) helo() error {
+func (c *Client) helo(logger Logger) error {
 	c.ext = nil
-	_, _, err := c.cmd(250, "HELO %s", c.localName)
+	_, _, err := c.cmd(logger, 250, "HELO %s", c.localName)
 	return err
 }
 
 // ehlo sends the EHLO (extended hello) greeting to the server. It
 // should be the preferred greeting for servers that support it.
-func (c *Client) ehlo() error {
-	_, msg, err := c.cmd(250, "EHLO %s", c.localName)
+func (c *Client) ehlo(logger Logger) error {
+	_, msg, err := c.cmd(logger, 250, "EHLO %s", c.localName)
 	if err != nil {
 		return err
 	}
@@ -153,18 +161,18 @@ func (c *Client) ehlo() error {
 
 // StartTLS sends the STARTTLS command and encrypts all further communication.
 // Only servers that advertise the STARTTLS extension support this function.
-func (c *Client) StartTLS(config *tls.Config) error {
-	if err := c.hello(); err != nil {
+func (c *Client) StartTLS(logger Logger, config *tls.Config) error {
+	if err := c.hello(logger); err != nil {
 		return err
 	}
-	_, _, err := c.cmd(220, "STARTTLS")
+	_, _, err := c.cmd(logger, 220, "STARTTLS")
 	if err != nil {
 		return err
 	}
 	c.conn = tls.Client(c.conn, config)
 	c.Text = textproto.NewConn(c.conn)
 	c.tls = true
-	return c.ehlo()
+	return c.ehlo(logger)
 }
 
 // TLSConnectionState returns the client's TLS connection state.
@@ -182,33 +190,33 @@ func (c *Client) TLSConnectionState() (state tls.ConnectionState, ok bool) {
 // If Verify returns nil, the address is valid. A non-nil return
 // does not necessarily indicate an invalid address. Many servers
 // will not verify addresses for security reasons.
-func (c *Client) Verify(addr string) error {
+func (c *Client) Verify(logger Logger, addr string) error {
 	if err := validateLine(addr); err != nil {
 		return err
 	}
-	if err := c.hello(); err != nil {
+	if err := c.hello(logger); err != nil {
 		return err
 	}
-	_, _, err := c.cmd(250, "VRFY %s", addr)
+	_, _, err := c.cmd(logger, 250, "VRFY %s", addr)
 	return err
 }
 
 // Auth authenticates a client using the provided authentication mechanism.
 // A failed authentication closes the connection.
 // Only servers that advertise the AUTH extension support this function.
-func (c *Client) Auth(a Auth) error {
-	if err := c.hello(); err != nil {
+func (c *Client) Auth(logger Logger, a Auth) error {
+	if err := c.hello(logger); err != nil {
 		return err
 	}
 	encoding := base64.StdEncoding
 	mech, resp, err := a.Start(&ServerInfo{c.serverName, c.tls, c.auth})
 	if err != nil {
-		c.Quit()
+		c.Quit(logger)
 		return err
 	}
 	resp64 := make([]byte, encoding.EncodedLen(len(resp)))
 	encoding.Encode(resp64, resp)
-	code, msg64, err := c.cmd(0, strings.TrimSpace(fmt.Sprintf("AUTH %s %s", mech, resp64)))
+	code, msg64, err := c.cmd(logger, 0, strings.TrimSpace(fmt.Sprintf("AUTH %s %s", mech, resp64)))
 	for err == nil {
 		var msg []byte
 		switch code {
@@ -225,8 +233,8 @@ func (c *Client) Auth(a Auth) error {
 		}
 		if err != nil {
 			// abort the AUTH
-			c.cmd(501, "*")
-			c.Quit()
+			c.cmd(logger, 501, "*")
+			c.Quit(logger)
 			break
 		}
 		if resp == nil {
@@ -234,7 +242,7 @@ func (c *Client) Auth(a Auth) error {
 		}
 		resp64 = make([]byte, encoding.EncodedLen(len(resp)))
 		encoding.Encode(resp64, resp)
-		code, msg64, err = c.cmd(0, string(resp64))
+		code, msg64, err = c.cmd(logger, 0, string(resp64))
 	}
 	return err
 }
@@ -243,11 +251,11 @@ func (c *Client) Auth(a Auth) error {
 // If the server supports the 8BITMIME extension, Mail adds the BODY=8BITMIME
 // parameter.
 // This initiates a mail transaction and is followed by one or more Rcpt calls.
-func (c *Client) Mail(from string) error {
+func (c *Client) Mail(logger Logger, from string) error {
 	if err := validateLine(from); err != nil {
 		return err
 	}
-	if err := c.hello(); err != nil {
+	if err := c.hello(logger); err != nil {
 		return err
 	}
 	cmdStr := "MAIL FROM:<%s>"
@@ -256,29 +264,33 @@ func (c *Client) Mail(from string) error {
 			cmdStr += " BODY=8BITMIME"
 		}
 	}
-	_, _, err := c.cmd(250, cmdStr, from)
+	_, _, err := c.cmd(logger, 250, cmdStr, from)
 	return err
 }
 
 // Rcpt issues a RCPT command to the server using the provided email address.
 // A call to Rcpt must be preceded by a call to Mail and may be followed by
 // a Data call or another Rcpt call.
-func (c *Client) Rcpt(to string) error {
+func (c *Client) Rcpt(logger Logger, to string) error {
 	if err := validateLine(to); err != nil {
 		return err
 	}
-	_, _, err := c.cmd(25, "RCPT TO:<%s>", to)
+	_, _, err := c.cmd(logger, 25, "RCPT TO:<%s>", to)
 	return err
 }
 
 type dataCloser struct {
-	c *Client
+	logger Logger
+	c      *Client
 	io.WriteCloser
 }
 
 func (d *dataCloser) Close() error {
 	d.WriteCloser.Close()
-	_, _, err := d.c.Text.ReadResponse(250)
+	code, msg, err := d.c.Text.ReadResponse(250)
+	if d.logger != nil {
+		d.logger.Logf("< %d: %s", code, msg)
+	}
 	return err
 }
 
@@ -286,12 +298,12 @@ func (d *dataCloser) Close() error {
 // can be used to write the mail headers and body. The caller should
 // close the writer before calling any more methods on c. A call to
 // Data must be preceded by one or more calls to Rcpt.
-func (c *Client) Data() (io.WriteCloser, error) {
-	_, _, err := c.cmd(354, "DATA")
+func (c *Client) Data(logger Logger) (io.WriteCloser, error) {
+	_, _, err := c.cmd(logger, 354, "DATA")
 	if err != nil {
 		return nil, err
 	}
-	return &dataCloser{c, c.Text.DotWriter()}, nil
+	return &dataCloser{logger, c, c.Text.DotWriter()}, nil
 }
 
 var testHookStartTLS func(*tls.Config) // nil, except for tests
@@ -316,7 +328,7 @@ var testHookStartTLS func(*tls.Config) // nil, except for tests
 // attachments (see the mime/multipart package), or other mail
 // functionality. Higher-level packages exist outside of the standard
 // library.
-func SendMail(addr string, a Auth, from string, to []string, msg io.WriterTo) error {
+func SendMail(logger Logger, addr string, localName string, a Auth, from string, to []string, msg io.WriterTo) error {
 	if err := validateLine(from); err != nil {
 		return err
 	}
@@ -325,20 +337,20 @@ func SendMail(addr string, a Auth, from string, to []string, msg io.WriterTo) er
 			return err
 		}
 	}
-	c, err := Dial(addr)
+	c, err := Dial(addr, localName)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	if err = c.hello(); err != nil {
+	if err = c.hello(logger); err != nil {
 		return err
 	}
-	if ok, _ := c.Extension("STARTTLS"); ok {
+	if ok, _ := c.Extension(logger, "STARTTLS"); ok {
 		config := &tls.Config{ServerName: c.serverName}
 		if testHookStartTLS != nil {
 			testHookStartTLS(config)
 		}
-		if err = c.StartTLS(config); err != nil {
+		if err = c.StartTLS(logger, config); err != nil {
 			return err
 		}
 	}
@@ -346,19 +358,19 @@ func SendMail(addr string, a Auth, from string, to []string, msg io.WriterTo) er
 		if _, ok := c.ext["AUTH"]; !ok {
 			return errors.New("smtp: server doesn't support AUTH")
 		}
-		if err = c.Auth(a); err != nil {
+		if err = c.Auth(logger, a); err != nil {
 			return err
 		}
 	}
-	if err = c.Mail(from); err != nil {
+	if err = c.Mail(logger, from); err != nil {
 		return err
 	}
 	for _, addr := range to {
-		if err = c.Rcpt(addr); err != nil {
+		if err = c.Rcpt(logger, addr); err != nil {
 			return err
 		}
 	}
-	w, err := c.Data()
+	w, err := c.Data(logger)
 	if err != nil {
 		return err
 	}
@@ -370,11 +382,11 @@ func SendMail(addr string, a Auth, from string, to []string, msg io.WriterTo) er
 	if err != nil {
 		return err
 	}
-	return c.Quit()
+	return c.Quit(logger)
 }
 
 type Connection interface {
-	SendMail(from string, to []string, msg io.WriterTo) error
+	SendMail(logger Logger, from string, to []string, msg io.WriterTo) error
 	Close() error
 }
 
@@ -382,24 +394,24 @@ type connection struct {
 	client *Client
 }
 
-type Dialer func(addr string, a Auth) (Connection, error)
+type Dialer func(logger Logger, addr string, localName string, a Auth) (Connection, error)
 
-func NewConnection(addr string, a Auth) (Connection, error) {
+func NewConnection(logger Logger, addr string, localName string, a Auth) (Connection, error) {
 	c := &connection{}
 	var err error
-	c.client, err = Dial(addr)
+	c.client, err = Dial(addr, localName)
 	if err != nil {
 		return nil, err
 	}
-	if err = c.client.hello(); err != nil {
+	if err = c.client.hello(logger); err != nil {
 		return nil, err
 	}
-	if ok, _ := c.client.Extension("STARTTLS"); ok {
+	if ok, _ := c.client.Extension(logger, "STARTTLS"); ok {
 		config := &tls.Config{ServerName: c.client.serverName}
 		if testHookStartTLS != nil {
 			testHookStartTLS(config)
 		}
-		if err = c.client.StartTLS(config); err != nil {
+		if err = c.client.StartTLS(logger, config); err != nil {
 			return nil, err
 		}
 	}
@@ -407,7 +419,7 @@ func NewConnection(addr string, a Auth) (Connection, error) {
 		if _, ok := c.client.ext["AUTH"]; !ok {
 			return nil, errors.New("smtp: server doesn't support AUTH")
 		}
-		if err = c.client.Auth(a); err != nil {
+		if err = c.client.Auth(logger, a); err != nil {
 			return nil, err
 		}
 	}
@@ -415,7 +427,7 @@ func NewConnection(addr string, a Auth) (Connection, error) {
 }
 
 // TODO return logs...
-func (c *connection) SendMail(from string, to []string, msg io.WriterTo) error {
+func (c *connection) SendMail(logger Logger, from string, to []string, msg io.WriterTo) error {
 	var err error
 	if err = validateLine(from); err != nil {
 		return err
@@ -425,15 +437,15 @@ func (c *connection) SendMail(from string, to []string, msg io.WriterTo) error {
 			return err
 		}
 	}
-	if err = c.client.Mail(from); err != nil {
+	if err = c.client.Mail(logger, from); err != nil {
 		return err
 	}
 	for _, addr := range to {
-		if err = c.client.Rcpt(addr); err != nil {
+		if err = c.client.Rcpt(logger, addr); err != nil {
 			return err
 		}
 	}
-	w, err := c.client.Data()
+	w, err := c.client.Data(logger)
 	if err != nil {
 		return err
 	}
@@ -449,15 +461,15 @@ func (c *connection) SendMail(from string, to []string, msg io.WriterTo) error {
 }
 
 func (c *connection) Close() error {
-	return c.client.Quit()
+	return c.client.Quit(nil)
 }
 
 // Extension reports whether an extension is support by the server.
 // The extension name is case-insensitive. If the extension is supported,
 // Extension also returns a string that contains any parameters the
 // server specifies for the extension.
-func (c *Client) Extension(ext string) (bool, string) {
-	if err := c.hello(); err != nil {
+func (c *Client) Extension(logger Logger, ext string) (bool, string) {
+	if err := c.hello(logger); err != nil {
 		return false, ""
 	}
 	if c.ext == nil {
@@ -470,30 +482,30 @@ func (c *Client) Extension(ext string) (bool, string) {
 
 // Reset sends the RSET command to the server, aborting the current mail
 // transaction.
-func (c *Client) Reset() error {
-	if err := c.hello(); err != nil {
+func (c *Client) Reset(logger Logger) error {
+	if err := c.hello(logger); err != nil {
 		return err
 	}
-	_, _, err := c.cmd(250, "RSET")
+	_, _, err := c.cmd(logger, 250, "RSET")
 	return err
 }
 
 // Noop sends the NOOP command to the server. It does nothing but check
 // that the connection to the server is okay.
-func (c *Client) Noop() error {
-	if err := c.hello(); err != nil {
+func (c *Client) Noop(logger Logger) error {
+	if err := c.hello(logger); err != nil {
 		return err
 	}
-	_, _, err := c.cmd(250, "NOOP")
+	_, _, err := c.cmd(logger, 250, "NOOP")
 	return err
 }
 
 // Quit sends the QUIT command and closes the connection to the server.
-func (c *Client) Quit() error {
-	if err := c.hello(); err != nil {
+func (c *Client) Quit(logger Logger) error {
+	if err := c.hello(logger); err != nil {
 		return err
 	}
-	_, _, err := c.cmd(221, "QUIT")
+	_, _, err := c.cmd(logger, 221, "QUIT")
 	if err != nil {
 		return err
 	}

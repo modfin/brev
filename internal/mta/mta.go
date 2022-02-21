@@ -11,13 +11,14 @@ import (
 	"github.com/modfin/brev/smtpx"
 	"github.com/modfin/brev/smtpx/pool"
 	"github.com/modfin/brev/tools"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Mail Transfer Agent, sending mails to where ever they should go
 
-func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer smtpx.Dialer) *MTA {
+func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer smtpx.Dialer, localName string) *MTA {
 	done := make(chan interface{})
 	m := &MTA{
 		done:          done,
@@ -25,7 +26,7 @@ func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer sm
 		db:            db,
 		emailMxLookup: emailMxLookup,
 		//smtpDialer:    dialer,
-		pool: pool.New(dialer, 2),
+		pool: pool.New(dialer, 2, localName),
 		closer: func() func() {
 			once := sync.Once{}
 			return func() {
@@ -124,7 +125,21 @@ func (m *MTA) start(workers int) error {
 	}
 }
 
+type lg struct {
+	buff []string
+}
+
+func (l *lg) Logf(format string, args ...interface{}) {
+	l.buff = append(l.buff, fmt.Sprintf(format, args...))
+}
+func (l *lg) print() {
+	fmt.Println(strings.Join(l.buff, "\n"))
+	l.buff = nil
+}
+
 func (m *MTA) worker(spool chan dao.SpoolEmail) {
+
+	logger := &lg{}
 
 	workerId := tools.RandStringRunes(5)
 
@@ -150,7 +165,8 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 			addr := mx.MXServers[0] + ":25"
 
 			start := time.Now()
-			err = m.pool.SendMail(addr, spoolmail.From, mx.Emails, bytes.NewBuffer(content))
+			err = m.pool.SendMail(logger, addr, spoolmail.From, mx.Emails, bytes.NewBuffer(content))
+			logger.print()
 			fmt.Printf("[MTA-Worker %s]: Transferred emails to %s domain through %s for %v, took %v\n", workerId, mx.Domain, addr, mx.Emails, time.Since(start))
 			if err != nil {
 				fmt.Printf("[MTA-Worker %s]: Faild transfer of emails to %s domain through %s for %v, err %v\n", workerId, mx.Domain, spoolmail.Recipients, time.Since(start), err)
