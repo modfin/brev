@@ -167,9 +167,10 @@ func (c *connection) sendMail(logger smtpx.Logger, from string, to []string, msg
 		fmt.Printf("[Pool-conn %s]: error while connecting to %s, %v\n", c.id, c.addr, err)
 		return err
 	}
+	c.conn.SetLogger(logger)
 
 	start := time.Now()
-	err = c.conn.SendMail(logger, from, to, msg)
+	err = c.conn.SendMail(from, to, msg)
 	fmt.Printf("[Pool-conn %s]: Sent email thorugh %s, took %v\n", c.id, c.addr, time.Since(start))
 	if err != nil {
 		fmt.Printf("[Pool-conn %s]: error while sending email, %v\n", c.id, err)
