@@ -229,7 +229,7 @@ var missingHeaderMail = "Received: tmail deliverd remote 439903a23facd153908f3e1
 func Test_NewSigOptions(t *testing.T) {
 	options := NewSigOptions()
 	assert.Equal(t, "rsa-sha256", options.Algo)
-	assert.Equal(t, "simple/simple", options.Canonicalization)
+	assert.Equal(t, "relaxed/relaxed", options.Canonicalization)
 }
 
 func loadPrivateKey(key []byte) (*rsa.PrivateKey, error) {
