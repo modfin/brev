@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"context"
 	"fmt"
 	"github.com/modfin/brev/smtpx"
 	"github.com/modfin/brev/tools"
@@ -10,35 +11,52 @@ import (
 	"time"
 )
 
-func New(dialer smtpx.Dialer, concurrency int, localName string) *Pool {
+func New(ctx context.Context, dialer smtpx.Dialer, concurrency int, localName string) *Pool {
 	p := &Pool{
-		localName:   localName,
-		concurrency: concurrency,
-		dialer:      dialer,
-		connections: map[string]*connections{},
+		localName:         localName,
+		concurrency:       concurrency,
+		dialer:            dialer,
+		lock:              &sync.RWMutex{},
+		addLock:           &sync.Mutex{},
+		connections:       map[string]*connections{},
+		cleanPoolInterval: 30 * time.Second,
 	}
-	go p.cleaner()
+	go p.cleaner(ctx)
 	return p
 }
 
-type Pool struct {
-	localName   string
-	concurrency int
-	dialer      smtpx.Dialer
-	lock        sync.RWMutex
-	addLock     sync.Mutex
-	connections map[string]*connections
-}
+type (
+	locker interface {
+		Lock()
+		Unlock()
+	}
+	rwLocker interface {
+		locker
+		RLock()
+		RUnlock()
+	}
+	Pool struct {
+		localName         string
+		concurrency       int
+		dialer            smtpx.Dialer
+		lock              rwLocker
+		addLock           locker
+		connections       map[string]*connections
+		cleanPoolInterval time.Duration
+	}
+)
 
-func (p *Pool) cleaner() {
+func (p *Pool) cleaner(ctx context.Context) {
 
 	maxLife := time.Minute
 
 	fmt.Printf("[Pool]: starting cleaner\n")
 	for {
 		select {
-		case <-time.After(30 * time.Second):
-			// TODO implement close
+		case <-time.After(p.cleanPoolInterval):
+		case <-ctx.Done():
+			fmt.Printf("[Pool]: cleaner stopped\n")
+			return
 		}
 
 		now := time.Now()
@@ -58,12 +76,9 @@ func (p *Pool) cleaner() {
 						fmt.Printf("[Pool]: got errer when cloasing connection to %s, err: %v\n", addr, err)
 					}
 					connection.conn = nil
-
-					connection.mu.Unlock()
-					continue
 				}
+				hasOpen = hasOpen || connection.conn != nil
 				connection.mu.Unlock()
-				hasOpen = true
 			}
 			if !hasOpen {
 				delete(p.connections, addr)
@@ -83,7 +98,8 @@ func (p *Pool) SendMail(logger smtpx.Logger, addr string, from string, to []stri
 	if conn == nil {
 		p.lock.RUnlock()
 		p.addLock.Lock()
-		if p.connections[addr] == nil {
+		conn = p.connections[addr]
+		if conn == nil {
 			conn = newConnections(addr, p.dialer, p.concurrency, p.localName)
 			p.connections[addr] = conn
 			fmt.Printf("[Pool]: added pool for %s\n", addr)
@@ -127,9 +143,10 @@ func (c *connections) sendMail(logger smtpx.Logger, from string, to []string, ms
 func newConnection(addr string, dialer smtpx.Dialer, localName string) *connection {
 	return &connection{
 		localName: localName,
-		id:        tools.RandStringRunes(8),
-		addr:      addr,
-		dialer:    dialer,
+		id:     tools.RandStringRunes(8),
+		addr:   addr,
+		dialer: dialer,
+		mu:     &sync.Mutex{},
 	}
 }
 
@@ -140,7 +157,7 @@ type connection struct {
 	dialer      smtpx.Dialer
 	conn        smtpx.Connection
 	lastMessage time.Time
-	mu          sync.Mutex
+	mu          locker
 }
 
 func (c *connection) connect(logger smtpx.Logger) error {
@@ -171,11 +188,12 @@ func (c *connection) sendMail(logger smtpx.Logger, from string, to []string, msg
 
 	start := time.Now()
 	err = c.conn.SendMail(from, to, msg)
-	fmt.Printf("[Pool-conn %s]: Sent email thorugh %s, took %v\n", c.id, c.addr, time.Since(start))
+	stop := time.Since(start)
 	if err != nil {
-		fmt.Printf("[Pool-conn %s]: error while sending email, %v\n", c.id, err)
+		fmt.Printf("[Pool-conn %s]: error while sending email, %v, took %v\n", c.id, err, stop)
 		return err
 	}
+	fmt.Printf("[Pool-conn %s]: Sent email thorugh %s, took %v\n", c.id, c.addr, stop)
 	c.lastMessage = time.Now()
 	return nil
 }

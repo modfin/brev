@@ -26,7 +26,7 @@ func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer sm
 		db:            db,
 		emailMxLookup: emailMxLookup,
 		//smtpDialer:    dialer,
-		pool: pool.New(dialer, 2, localName),
+		pool: pool.New(ctx, dialer, 2, localName),
 		closer: func() func() {
 			once := sync.Once{}
 			return func() {
