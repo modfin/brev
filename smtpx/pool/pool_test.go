@@ -200,7 +200,7 @@ func TestPool_SendMail(t *testing.T) {
 		}
 	)
 
-	defaultDialer := func(addr string, a smtpx.Auth) (smtpx.Connection, error) {
+	defaultDialer := func(logger smtpx.Logger, addr string, localName string, a smtpx.Auth) (smtpx.Connection, error) {
 		return &testConnection{sendDelay: 100 * time.Millisecond}, nil
 	}
 
@@ -211,7 +211,7 @@ func TestPool_SendMail(t *testing.T) {
 		if dialerFunc == nil {
 			dialerFunc = defaultDialer
 		}
-		p := New(ctx, dialerFunc, tc.concurrency)
+		p := New(ctx, dialerFunc, tc.concurrency, "hostname")
 		p.lock = rwMu
 		p.addLock = mu
 		return p, mu, rwMu
@@ -224,7 +224,7 @@ func TestPool_SendMail(t *testing.T) {
 		{
 			name:        "dialer_error",
 			concurrency: 1,
-			dialer: func(addr string, a smtpx.Auth) (smtpx.Connection, error) {
+			dialer: func(logger smtpx.Logger, addr string, localName string, a smtpx.Auth) (smtpx.Connection, error) {
 				return nil, testErr
 			},
 			wantErrCnt: 2,
@@ -232,7 +232,7 @@ func TestPool_SendMail(t *testing.T) {
 		{
 			name:        "send_error",
 			concurrency: 1,
-			dialer: func(addr string, a smtpx.Auth) (smtpx.Connection, error) {
+			dialer: func(logger smtpx.Logger, addr string, localName string, a smtpx.Auth) (smtpx.Connection, error) {
 				return &testConnection{sendDelay: 10 * time.Millisecond, sendErr: testErr}, nil
 			},
 			wantErrCnt: 2,
@@ -257,7 +257,7 @@ func TestPool_SendMail(t *testing.T) {
 				// Start parallell sending of mails
 				for i := 0; i < mts; i++ {
 					go func() {
-						respChan <- pool.SendMail("test", "from", []string{"to"}, nil)
+						respChan <- pool.SendMail(nil, "test", "from", []string{"to"}, nil)
 					}()
 				}
 
@@ -339,6 +339,10 @@ func (tc *testConnection) SendMail(from string, to []string, msg io.WriterTo) er
 		return tc.sendErr
 	}
 	return tc.sendMailResultFunc(from, to, msg)
+}
+
+func (tc *testConnection) SetLogger(logger smtpx.Logger) {
+
 }
 
 func (tc *testConnection) Close() error {

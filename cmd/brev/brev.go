@@ -229,7 +229,7 @@ func sendmail(c *cli.Context) (err error) {
 			auth = smtpx.PlainAuth("", msaUser, msaPass, strings.Split(msaServer, ":")[0])
 		}
 
-		return smtpx.SendMail(msaServer, auth, from, emails, message)
+		return smtpx.SendMail(nil, msaServer, "localhost", auth, from, emails, message)
 	}
 
 	transferlist := dnsx.LookupEmailMX(emails)
@@ -251,7 +251,7 @@ func sendmail(c *cli.Context) (err error) {
 			fmt.Println(" - ", t)
 		}
 
-		err = smtpx.SendMail(addr, nil, from, mx.Emails, message)
+		err = smtpx.SendMail(nil, addr, "localhost", nil, from, mx.Emails, message)
 		if err != nil {
 			return
 		}
