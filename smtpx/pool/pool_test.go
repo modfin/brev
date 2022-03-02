@@ -201,7 +201,7 @@ func TestPool_SendMail(t *testing.T) {
 	)
 
 	defaultDialer := func(logger smtpx.Logger, addr string, localName string, a smtpx.Auth) (smtpx.Connection, error) {
-		return &testConnection{sendDelay: 100 * time.Millisecond}, nil
+		return &testConnection{sendDelay: 10 * time.Millisecond}, nil
 	}
 
 	newPool := func(ctx context.Context, tc testCase) (*Pool, *testMutex, *testRWMutex) {
@@ -219,7 +219,8 @@ func TestPool_SendMail(t *testing.T) {
 
 	for _, tc := range []testCase{
 		{
-			name: "happy_flow",
+			name:        "happy_flow",
+			concurrency: 4,
 		},
 		{
 			name:        "dialer_error",
@@ -240,11 +241,7 @@ func TestPool_SendMail(t *testing.T) {
 	} {
 		t.Run(tc.name, func(tc testCase) func(t *testing.T) {
 			return func(t *testing.T) {
-				//t.Parallel()
-
-				if tc.concurrency < 1 {
-					tc.concurrency = 4
-				}
+				t.Parallel()
 
 				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 				defer cancel()
@@ -279,43 +276,6 @@ func TestPool_SendMail(t *testing.T) {
 			}
 		}(tc))
 	}
-	//type fields struct {
-	//	concurrency       int
-	//	dialer            smtpx.Dialer
-	//	lock              rwLocker
-	//	addLock           locker
-	//	connections       map[string]*connections
-	//	cleanPoolInterval time.Duration
-	//}
-	//type args struct {
-	//	addr string
-	//	from string
-	//	to   []string
-	//	msg  io.WriterTo
-	//}
-	//tests := []struct {
-	//	name    string
-	//	fields  fields
-	//	args    args
-	//	wantErr bool
-	//}{
-	//	// TODO: Add test cases.
-	//}
-	//for _, tt := range tests {
-	//	t.Run(tt.name, func(t *testing.T) {
-	//		p := &Pool{
-	//			concurrency:       tt.fields.concurrency,
-	//			dialer:            tt.fields.dialer,
-	//			lock:              tt.fields.lock,
-	//			addLock:           tt.fields.addLock,
-	//			connections:       tt.fields.connections,
-	//			cleanPoolInterval: tt.fields.cleanPoolInterval,
-	//		}
-	//		if err := p.SendMail(tt.args.addr, tt.args.from, tt.args.to, tt.args.msg); (err != nil) != tt.wantErr {
-	//			t.Errorf("SendMail() error = %v, wantErr %v", err, tt.wantErr)
-	//		}
-	//	})
-	//}
 }
 
 func newTestPool(dialer smtpx.Dialer, concurrency int, cleanPoolInterval time.Duration) (*Pool, *testMutex, *testRWMutex) {
@@ -349,37 +309,6 @@ func (tc *testConnection) Close() error {
 	tc.closed = true
 	return tc.closeErr
 }
-
-//func testDialer(addr string, a smtpx.Auth) (smtpx.Connection, error) {
-//	//c := &connection{}
-//	//var err error
-//	//c.client, err = Dial(addr)
-//	//if err != nil {
-//	//	return nil, err
-//	//}
-//	//if err = c.client.hello(); err != nil {
-//	//	return nil, err
-//	//}
-//	//if ok, _ := c.client.Extension("STARTTLS"); ok {
-//	//	config := &tls.Config{ServerName: c.client.serverName}
-//	//	if testHookStartTLS != nil {
-//	//		testHookStartTLS(config)
-//	//	}
-//	//	if err = c.client.StartTLS(config); err != nil {
-//	//		return nil, err
-//	//	}
-//	//}
-//	//if a != nil && c.client.ext != nil {
-//	//	if _, ok := c.client.ext["AUTH"]; !ok {
-//	//		return nil, errors.New("smtp: server doesn't support AUTH")
-//	//	}
-//	//	if err = c.client.Auth(a); err != nil {
-//	//		return nil, err
-//	//	}
-//	//}
-//	//return c, nil
-//	return nil, nil
-//}
 
 func validateLockStatus(t *testing.T, mu *testMutex, hasLocked, isLocked bool) {
 	if mu.hasLocked != hasLocked {
