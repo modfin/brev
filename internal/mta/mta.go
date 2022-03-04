@@ -25,8 +25,7 @@ func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer sm
 		ctx:           ctx,
 		db:            db,
 		emailMxLookup: emailMxLookup,
-		//smtpDialer:    dialer,
-		pool: pool.New(ctx, dialer, 2, localName),
+		pool:          pool.New(ctx, dialer, 2, localName),
 		closer: func() func() {
 			once := sync.Once{}
 			return func() {
@@ -44,14 +43,14 @@ type MTA struct {
 	ctx           context.Context
 	db            dao.DAO
 	emailMxLookup dnsx.MXLookup
-	//smtpDialer    smtpx.Dialer
-	pool   *pool.Pool
-	closer func()
+	pool          *pool.Pool
+	closer        func()
 }
 
 func (m *MTA) Done() <-chan interface{} {
 	return m.done
 }
+
 func (m *MTA) Stop() {
 	m.closer()
 }
@@ -67,6 +66,7 @@ func (m *MTA) Start(workers int) {
 	}()
 
 }
+
 func (m *MTA) start(workers int) error {
 
 	localDone := make(chan interface{})
@@ -132,6 +132,7 @@ type lg struct {
 func (l *lg) Logf(format string, args ...interface{}) {
 	l.buff = append(l.buff, fmt.Sprintf(format, args...))
 }
+
 func (l *lg) print() {
 	fmt.Println(strings.Join(l.buff, "\n"))
 	l.buff = nil
@@ -152,7 +153,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 			continue
 		}
 		transferlist := m.emailMxLookup(spoolmail.Recipients)
-		if err != nil {
+		if len(transferlist) == 0 {
 			fmt.Printf("[MTA-Worker %s] could not look up TransferList server for recipiants of mail %s, err %v\n", workerId, spoolmail.MessageId, err)
 			continue
 		}
@@ -166,12 +167,13 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 			start := time.Now()
 			err = m.pool.SendMail(logger, addr, spoolmail.From, mx.Emails, bytes.NewBuffer(content))
+			stop := time.Since(start)
 			logger.print()
-			fmt.Printf("[MTA-Worker %s]: Transferred emails to %s domain through %s for %v, took %v\n", workerId, mx.Domain, addr, mx.Emails, time.Since(start))
 			if err != nil {
-				fmt.Printf("[MTA-Worker %s]: Faild transfer of emails to %s domain through %s for %v, err %v\n", workerId, mx.Domain, spoolmail.Recipients, time.Since(start), err)
+				fmt.Printf("[MTA-Worker %s]: Faild transfer of emails to %s domain through %s for %v, err %v\n", workerId, mx.Domain, spoolmail.Recipients, stop, err)
 				continue
 			}
+			fmt.Printf("[MTA-Worker %s]: Transferred emails to %s domain through %s for %v, took %v\n", workerId, mx.Domain, addr, mx.Emails, stop)
 		}
 		err = m.db.UpdateEmailBrevStatus(spoolmail.MessageId, "sent")
 		if err != nil {
