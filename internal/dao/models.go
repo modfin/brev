@@ -14,6 +14,7 @@ type SpoolEmail struct {
 	StatusBrev string `db:"status_brev"`
 	StatusSmtp string `db:"status_smtp"`
 	From       string `db:"from_"`
+	MXServers  []string
 	Recipients []string
 	SendAt     time.Time `db:"send_at"`
 	SendCount  int       `db:"send_count"`

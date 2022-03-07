@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/modfin/brev"
+	"github.com/modfin/brev/dnsx"
 	"github.com/modfin/brev/internal/dao"
 	"github.com/modfin/brev/internal/signals"
 	"github.com/modfin/brev/smtpx/dkim"
@@ -75,7 +76,7 @@ func newMessageId(hostname string) string {
 	return fmt.Sprintf("%s=%s", uuid.New().String(), hostname)
 }
 
-func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname string, defaultMXDomain string) echo.HandlerFunc {
+func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname string, defaultMXDomain string, emailMxLookup dnsx.MXLookup) echo.HandlerFunc {
 
 	return func(c echo.Context) error {
 
@@ -123,12 +124,6 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 		}
 
 		returnPath := fmt.Sprintf("bounces_%s@%s", messageId, mxDomain)
-		spoolmail := dao.SpoolEmail{
-			MessageId:  messageId,
-			ApiKey:     key.Key,
-			From:       returnPath, // From here is used in the smtp process and the return-path will be added by the receiver
-			Recipients: email.Recipients(),
-		}
 
 		localSigner := signer.
 			With(dkim.OpDomain(key.Domain)).
@@ -139,7 +134,19 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 			return fmt.Errorf("failed to marshal envelop, err %v", err)
 		}
 
-		err = db.AddEmailToSpool(spoolmail, content)
+		transferlist := emailMxLookup(email.Recipients())
+
+		for _, transfer := range transferlist {
+			spoolmail := dao.SpoolEmail{
+				MessageId:  messageId,
+				ApiKey:     key.Key,
+				From:       returnPath, // From here is used in the smtp process and the return-path will be added by the receiver
+				Recipients: transfer.Emails,
+				MXServers:  transfer.MXServers,
+			}
+			err = db.AddEmailToSpool(spoolmail, content)
+		}
+
 		if err != nil {
 			return fmt.Errorf("failed to add to spool, err %v", err)
 		}
@@ -147,6 +154,6 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 		// Informs MTA to wake up and start processing mail if a sleep at the moment.
 		signals.Broadcast(signals.NewMailInSpool)
 
-		return c.JSONBlob(200, []byte(fmt.Sprintf(`{"message_id": "%s" }`, spoolmail.MessageId)))
+		return c.JSONBlob(200, []byte(fmt.Sprintf(`{"message_id": "%s" }`, messageId)))
 	}
 }

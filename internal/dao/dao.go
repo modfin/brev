@@ -11,7 +11,8 @@ import (
 
 type DAO interface {
 	GetApiKey(key string) (*ApiKey, error)
-	AddEmailToSpool(email SpoolEmail, content []byte) error
+	AddEmailContent(messadeId string, content []byte) error
+	AddTransferListToSpool(email SpoolEmail) error
 	GetQueuedEmails(count int) (emails []SpoolEmail, err error)
 	ClaimEmail(messageId string) error
 	UpdateEmailBrevStatus(messageId string, statusBrev string) error
@@ -299,14 +300,19 @@ func (s *sqlite) ensureSchema() error {
 	CREATE TABLE IF NOT EXISTS api_key (
 	    api_key TEXT PRIMARY KEY,
 		domain TEXT NOT NULL,
-	    mx_cname TEXT DEFAULT ''
+	    mx_cname TEXT DEFAULT '',
+	    
+	    posthook_url TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS spool (
-	    message_id TEXT PRIMARY KEY,
+	    transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
 	    api_key TEXT,
 	    
+	    message_id TEXT,
+
 	    from_ 	   TEXT NOT NULL,
+	    mx_servers TEXT NOT NULL,
 	    recipients TEXT NOT NULL,
 	    
 	    status_brev TEXT, -- queued, processing, sent, failed
@@ -328,8 +334,8 @@ func (s *sqlite) ensureSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_spool_send_at ON spool(send_at) WHERE status_brev = 'queued' AND send_count < 3;
 
 	CREATE TABLE IF NOT EXISTS spool_log (
-	    message_id TEXT NOT NULL,
 	    created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+	    message_id TEXT NOT NULL,
 	    log TEXT NOT NULL,
 	    PRIMARY KEY (message_id, created_at)
 	);
