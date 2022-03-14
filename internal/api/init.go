@@ -6,6 +6,7 @@ import (
 	"github.com/labstack/echo-contrib/prometheus"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/modfin/brev/dnsx"
 	"github.com/modfin/brev/internal/config"
 	"github.com/modfin/brev/internal/dao"
 	"github.com/modfin/brev/smtpx/dkim"
@@ -35,7 +36,7 @@ func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
 	e.Use(middleware.Logger(), prom.HandlerFunc)
 
 	cfg := config.Get()
-	e.POST("/mta", EnqueueMTA(db, cfg.DKIMSelector, signer, cfg.Hostname, cfg.MXDomain))
+	e.POST("/mta", EnqueueMTA(db, cfg.DKIMSelector, signer, cfg.Hostname, cfg.MXDomain, dnsx.LookupEmailMX))
 	//e.GET("/mta")            // returns list of sent emails
 	//e.GET("/mta/:messageId") // returns log of specific email
 

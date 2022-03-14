@@ -48,7 +48,7 @@ type (
 
 func (p *Pool) cleaner(ctx context.Context) {
 
-	maxLife := time.Minute
+	maxLife := 15 * time.Second
 
 	fmt.Printf("[Pool]: starting cleaner\n")
 	for {
@@ -143,10 +143,10 @@ func (c *connections) sendMail(logger smtpx.Logger, from string, to []string, ms
 func newConnection(addr string, dialer smtpx.Dialer, localName string) *connection {
 	return &connection{
 		localName: localName,
-		id:     tools.RandStringRunes(8),
-		addr:   addr,
-		dialer: dialer,
-		mu:     &sync.Mutex{},
+		id:        tools.RandStringRunes(8),
+		addr:      addr,
+		dialer:    dialer,
+		mu:        &sync.Mutex{},
 	}
 }
 
@@ -185,6 +185,7 @@ func (c *connection) sendMail(logger smtpx.Logger, from string, to []string, msg
 		return err
 	}
 	c.conn.SetLogger(logger)
+	defer c.conn.SetLogger(nil)
 
 	start := time.Now()
 	err = c.conn.SendMail(from, to, msg)

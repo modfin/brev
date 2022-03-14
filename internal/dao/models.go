@@ -9,17 +9,17 @@ const BrevStatusProcessing = "processing"
 const BrevStatusSent = "sent"
 
 type SpoolEmail struct {
-	MessageId  string `db:"message_id"`
-	ApiKey     string `db:"api_key"`
-	StatusBrev string `db:"status_brev"`
-	StatusSmtp string `db:"status_smtp"`
-	From       string `db:"from_"`
-	MXServers  []string
-	Recipients []string
-	SendAt     time.Time `db:"send_at"`
-	SendCount  int       `db:"send_count"`
-	CreatedAt  time.Time `db:"created_at"`
-	UpdatedAt  time.Time `db:"updated_at"`
+	TransactionId int64  `db:"transaction_id"`
+	MessageId     string `db:"message_id"`
+	ApiKey        string `db:"api_key"`
+	Status        string `db:"status"`
+	From          string `db:"from_"`
+	MXServers     []string
+	Recipients    []string
+	SendAt        time.Time `db:"send_at"`
+	SendCount     int       `db:"send_count"`
+	CreatedAt     time.Time `db:"created_at"`
+	UpdatedAt     time.Time `db:"updated_at"`
 }
 
 type ApiKey struct {

@@ -134,18 +134,28 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 			return fmt.Errorf("failed to marshal envelop, err %v", err)
 		}
 
+		var spoolmails []dao.SpoolEmail
 		transferlist := emailMxLookup(email.Recipients())
 
 		for _, transfer := range transferlist {
-			spoolmail := dao.SpoolEmail{
+			if transfer.Err != nil {
+				err = transfer.Err
+				fmt.Printf("[API] got error from dns lookup, %v", err)
+				continue
+			}
+			spoolmails = append(spoolmails, dao.SpoolEmail{
 				MessageId:  messageId,
 				ApiKey:     key.Key,
 				From:       returnPath, // From here is used in the smtp process and the return-path will be added by the receiver
 				Recipients: transfer.Emails,
 				MXServers:  transfer.MXServers,
-			}
-			err = db.AddEmailToSpool(spoolmail, content)
+			})
 		}
+		if len(spoolmails) == 0 && err != nil {
+			return fmt.Errorf("failed to find recipiants mx servers, err %v", err)
+		}
+
+		err = db.AddEmailToSpool(spoolmails, content)
 
 		if err != nil {
 			return fmt.Errorf("failed to add to spool, err %v", err)

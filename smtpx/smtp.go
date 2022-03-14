@@ -2,17 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package smtp implements the Simple Mail Transfer Protocol as defined in RFC 5321.
-// It also implements the following extensions:
-//	8BITMIME  RFC 1652
-//	AUTH      RFC 2554
-//	STARTTLS  RFC 3207
-// Additional extensions may be handled by clients.
-//
-// The smtp package is frozen and is not accepting new features.
-// Some external packages provide more functionality. See:
-//
-//   https://godoc.org/?q=smtp
 package smtpx
 
 import (
@@ -117,7 +106,7 @@ func (c *Client) Hello(localName string) error {
 // cmd is a convenience function that sends a command and returns the response
 func (c *Client) cmd(expectCode int, format string, args ...interface{}) (int, string, error) {
 	if c.logger != nil {
-		c.logger.Logf("> "+format, args...)
+		c.logger.Logf("smtp > "+format, args...)
 	}
 
 	id, err := c.Text.Cmd(format, args...)
@@ -128,7 +117,7 @@ func (c *Client) cmd(expectCode int, format string, args ...interface{}) (int, s
 	defer c.Text.EndResponse(id)
 	code, msg, err := c.Text.ReadResponse(expectCode)
 	if c.logger != nil {
-		c.logger.Logf("< %d: %s", code, msg)
+		c.logger.Logf("smtp < %d: %s", code, msg)
 	}
 	return code, msg, err
 }

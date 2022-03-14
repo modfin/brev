@@ -11,13 +11,14 @@ import (
 
 type DAO interface {
 	GetApiKey(key string) (*ApiKey, error)
-	AddEmailContent(messadeId string, content []byte) error
-	AddTransferListToSpool(email SpoolEmail) error
 	GetQueuedEmails(count int) (emails []SpoolEmail, err error)
-	ClaimEmail(messageId string) error
-	UpdateEmailBrevStatus(messageId string, statusBrev string) error
-	//UpdateEmailSmtpStatus(id string, statusBrev string) error
+	ClaimEmail(transactionId int64) error
+	UpdateEmailBrevStatus(transactionId int64, statusBrev string) error
 	GetEmailContent(messageId string) ([]byte, error)
+	AddEmailToSpool(spoolmails []SpoolEmail, content []byte) error
+
+	AddSpoolSpecificLogEntry(messageId string, transactionId int64, log string) error
+	AddSpoolLogEntry(messageId string, log string) error
 }
 
 func NewSQLite(path string) (DAO, error) {
@@ -31,11 +32,86 @@ type sqlite struct {
 	path string
 }
 
-func (s *sqlite) UpdateEmailBrevStatus(messageId string, statusBrev string) error {
+func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (err error) {
+
+	if len(transfers) == 0 {
+		return errors.New("transfer list must be greater than 0")
+	}
+
+	var tx *sqlx.Tx
+	tx, err = s.getTX()
+	if err != nil {
+		err = fmt.Errorf("failed to get transaction, err %v", err)
+		return
+	}
+
+	defer func() {
+		if err == nil {
+			err = tx.Commit()
+			return
+		}
+		fmt.Printf("[DAO]: failed adding to spool, rolling back,%v\n", err)
+		_ = tx.Rollback()
+	}()
+
+	messageId := transfers[0].MessageId
+
+	q0 := `INSERT INTO spool_content(message_id, content) VALUES (?, ?)`
+
+	_, err = tx.Exec(q0, messageId, string(content))
+	if err != nil {
+		err = fmt.Errorf("faild to insert into spool_content, %v", err)
+		return
+	}
+	err = s.AddSpoolLogEntryTx(tx, messageId, "email content has been added into spool_content")
+	if err != nil {
+		return err
+	}
+
+	q1 := `
+	INSERT INTO spool(message_id, api_key, from_, recipients, mx_servers, status, send_at)
+	VALUES (:message_id, :api_key, :from_, :recipients, :mx_servers, :status, :send_at) 
+	RETURNING transaction_id
+	`
+	stmt, err := tx.PrepareNamed(q1)
+	if err != nil {
+		err = fmt.Errorf("failed to prepare statement, err %v", err)
+		return
+	}
+	defer stmt.Close()
+	for _, transfer := range transfers {
+
+		var transactionId int64
+		err = stmt.Get(&transactionId, map[string]interface{}{
+			"message_id": transfer.MessageId,
+			"api_key":    transfer.ApiKey,
+			"from_":      transfer.From,
+			"recipients": strings.Join(transfer.Recipients, " "),
+			"mx_servers": strings.Join(transfer.MXServers, " "),
+			"status":     BrevStatusQueued,
+			"send_at":    time.Now().In(time.UTC),
+		})
+		if err != nil {
+			err = fmt.Errorf("failed to insert into spool table, err %v", err)
+			return
+		}
+
+		err = s.AddSpoolSpecificLogEntryTx(tx, messageId, transactionId, "transfer list has been added to spool")
+		if err != nil {
+			err = fmt.Errorf("failed to insert log entry, err %v", err)
+			return
+		}
+	}
+
+	return
+}
+
+func (s *sqlite) UpdateEmailBrevStatus(transactionId int64, statusBrev string) error {
 	q := `
 		UPDATE spool
-		SET status_brev = ?
-		WHERE message_id = ?
+		SET status = ?
+		WHERE transaction_id = ?
+		RETURNING message_id
 	`
 	var err error
 	var tx *sqlx.Tx
@@ -51,19 +127,24 @@ func (s *sqlite) UpdateEmailBrevStatus(messageId string, statusBrev string) erro
 		_ = tx.Rollback()
 	}()
 
-	_, err = tx.Exec(q, statusBrev, messageId)
+	var messageId string
+	err = tx.Get(&messageId, q, statusBrev, transactionId)
 	if err != nil {
 		return err
 	}
+
+	err = s.AddSpoolSpecificLogEntryTx(tx, messageId, transactionId, "spool brev status set to "+statusBrev)
+
 	return nil
 }
 
-func (s *sqlite) ClaimEmail(messageId string) (err error) {
+func (s *sqlite) ClaimEmail(transactionId int64) (err error) {
 	q := `
 		UPDATE spool
-		SET status_brev = 'processing'
-		WHERE message_id = ?
-          AND status_brev = 'queued'
+		SET status = 'processing'
+		WHERE transaction_id = ?
+          AND status = 'queued'
+		RETURNING message_id 
 	`
 
 	var tx *sqlx.Tx
@@ -79,30 +160,38 @@ func (s *sqlite) ClaimEmail(messageId string) (err error) {
 		_ = tx.Rollback()
 	}()
 
-	res, err := tx.Exec(q, messageId)
+	var messageIds []string
+	err = tx.Select(&messageIds, q, transactionId)
 	if err != nil {
 		return err
 	}
 
-	affected, err := res.RowsAffected()
-
-	if affected != 1 {
-		err = fmt.Errorf("could not claim email %s, %d was affected by claim atempt", messageId, affected)
+	if len(messageIds) != 1 {
+		err = fmt.Errorf("could not claim email transaction id %s, %d was affected by claim atempt", transactionId, len(messageIds))
 		return
 	}
 
-	err = s.AddSpoolLogEntryTx(tx, messageId, "claimed by internal spool")
+	messageId := messageIds[0]
+
+	err = s.AddSpoolSpecificLogEntryTx(tx, messageId, transactionId, "claimed by internal spool")
 	return
 
 }
 
 func (s *sqlite) AddSpoolLogEntry(messageId, log string) error {
+	return s.AddSpoolSpecificLogEntry(messageId, 0, log)
+}
 
+func (s *sqlite) AddSpoolLogEntryTx(tx *sqlx.Tx, messageId, log string) error {
+	return s.AddSpoolSpecificLogEntryTx(tx, messageId, 0, log)
+}
+
+func (s *sqlite) AddSpoolSpecificLogEntry(messageId string, transactionId int64, log string) error {
 	tx, err := s.getTX()
 	if err != nil {
 		return err
 	}
-	err = s.AddSpoolLogEntryTx(tx, messageId, log)
+	err = s.AddSpoolSpecificLogEntryTx(tx, messageId, transactionId, log)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -111,67 +200,23 @@ func (s *sqlite) AddSpoolLogEntry(messageId, log string) error {
 	return tx.Commit()
 }
 
-func (s *sqlite) AddSpoolLogEntryTx(tx *sqlx.Tx, messageId, log string) error {
+func (s *sqlite) AddSpoolSpecificLogEntryTx(tx *sqlx.Tx, messageId string, transactionId int64, log string) error {
+
 	q := `
-	INSERT INTO spool_log (message_id, created_at, log)
-	VALUES (?, ?, ?)
+	INSERT INTO spool_log (message_id, transaction_id, created_at, log)
+	VALUES (?, ?, ?, ?)
 	`
-	_, err := tx.Exec(q, messageId, time.Now().In(time.UTC), log)
+
+	var tid *int64
+	if transactionId > 0 {
+		tid = &transactionId
+	}
+	_, err := tx.Exec(q, messageId, tid, time.Now().In(time.UTC), log)
 	if err != nil {
 		return fmt.Errorf("failed to insert log entry, %v", err)
 	}
 	return err
-}
 
-func (s *sqlite) AddEmailToSpool(email SpoolEmail, content []byte) (err error) {
-	q1 := `
-	INSERT INTO spool(message_id, api_key, from_, recipients, status_brev, send_at)
-	VALUES (:message_id, :api_key, :from_, :recipients, :status_brev, :send_at) 
-`
-	var tx *sqlx.Tx
-	tx, err = s.getTX()
-	if err != nil {
-		err = fmt.Errorf("failed to get transaction, err %v", err)
-		return
-	}
-	defer func() {
-		if err == nil {
-			err = tx.Commit()
-			return
-		}
-		fmt.Printf("[DAO]: failed adding to spool, rolling back,%v\n", err)
-		_ = tx.Rollback()
-	}()
-
-	stmt, err := tx.PrepareNamed(q1)
-	if err != nil {
-		err = fmt.Errorf("failed to prepare statement, err %v", err)
-		return
-	}
-	defer stmt.Close()
-
-	_, err = stmt.Exec(map[string]interface{}{
-		"message_id":  email.MessageId,
-		"api_key":     email.ApiKey,
-		"from_":       email.From,
-		"recipients":  strings.Join(email.Recipients, " "),
-		"status_brev": BrevStatusQueued,
-		"send_at":     time.Now().In(time.UTC),
-	})
-	if err != nil {
-		err = fmt.Errorf("failed to insert into spool table, err %v", err)
-		return
-	}
-
-	q2 := `INSERT INTO spool_content(message_id, content) VALUES (?, ?)`
-
-	_, err = tx.Exec(q2, email.MessageId, string(content))
-	if err != nil {
-		err = fmt.Errorf("faild to insert into spool_content, %v", err)
-		return
-	}
-	err = s.AddSpoolLogEntryTx(tx, email.MessageId, "spool entry and content has been added")
-	return
 }
 
 func (s *sqlite) GetEmailContent(messageId string) ([]byte, error) {
@@ -190,7 +235,7 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 	    SELECT *
 		FROM spool
 		WHERE send_at <= ?
-		  AND status_brev = 'queued'
+		  AND status = 'queued'
 		ORDER BY send_at
 		LIMIT ?
 	`
@@ -211,6 +256,7 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 	var intr []struct {
 		SpoolEmail
 		Recipients string `db:"recipients"`
+		MXServers  string `db:"mx_servers"`
 	}
 
 	err = tx.Select(&intr, q1, time.Now().In(time.UTC), count)
@@ -220,8 +266,9 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 
 	for _, mail := range intr {
 		mail.SpoolEmail.Recipients = strings.Split(mail.Recipients, " ")
+		mail.SpoolEmail.MXServers = strings.Split(mail.MXServers, " ")
 		emails = append(emails, mail.SpoolEmail)
-		err = s.AddSpoolLogEntryTx(tx, mail.MessageId, "retrieved from queue")
+		err = s.AddSpoolSpecificLogEntryTx(tx, mail.MessageId, mail.TransactionId, "retrieved from queue")
 		if err != nil {
 			return
 		}
@@ -315,8 +362,7 @@ func (s *sqlite) ensureSchema() error {
 	    mx_servers TEXT NOT NULL,
 	    recipients TEXT NOT NULL,
 	    
-	    status_brev TEXT, -- queued, processing, sent, failed
-	    status_smtp TEXT DEFAULT '', -- 250, 4xx, 5xx
+	    status     TEXT, -- queued, processing, sent, failed
 	    
 	    send_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
 	    send_count INT DEFAULT 0,
@@ -324,18 +370,19 @@ func (s *sqlite) ensureSchema() error {
 		created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
 		updated_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
 	);
+	CREATE INDEX IF NOT EXISTS idx_spool_send_at ON spool(send_at) WHERE status = 'queued' AND send_count < 3;
+
+
 	CREATE TABLE IF NOT EXISTS spool_content (
 		message_id TEXT PRIMARY KEY NOT NULL,
 		content TEXT NOT NULL,
 		created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
 	);
 
-
-	CREATE INDEX IF NOT EXISTS idx_spool_send_at ON spool(send_at) WHERE status_brev = 'queued' AND send_count < 3;
-
 	CREATE TABLE IF NOT EXISTS spool_log (
 	    created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
 	    message_id TEXT NOT NULL,
+	    transaction_id TEXT INTEGER,
 	    log TEXT NOT NULL,
 	    PRIMARY KEY (message_id, created_at)
 	);
