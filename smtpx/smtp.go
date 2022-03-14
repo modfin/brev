@@ -286,7 +286,7 @@ func (d *dataCloser) Close() error {
 	d.WriteCloser.Close()
 	code, msg, err := d.c.Text.ReadResponse(250)
 	if d.c.logger != nil {
-		d.c.logger.Logf("< %d: %s", code, msg)
+		d.c.logger.Logf("smtp < %d: %s", code, msg)
 	}
 	return err
 }

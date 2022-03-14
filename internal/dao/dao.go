@@ -14,8 +14,11 @@ type DAO interface {
 	GetQueuedEmails(count int) (emails []SpoolEmail, err error)
 	ClaimEmail(transactionId int64) error
 	UpdateEmailBrevStatus(transactionId int64, statusBrev string) error
+	UpdateSendCount(email SpoolEmail) error
+
 	GetEmailContent(messageId string) ([]byte, error)
 	AddEmailToSpool(spoolmails []SpoolEmail, content []byte) error
+	RescheduleEmailToSpool(spoolmail SpoolEmail) error
 
 	AddSpoolSpecificLogEntry(messageId string, transactionId int64, log string) error
 	AddSpoolLogEntry(messageId string, log string) error
@@ -30,6 +33,48 @@ func NewSQLite(path string) (DAO, error) {
 type sqlite struct {
 	db   *sqlx.DB
 	path string
+}
+
+func (s *sqlite) RescheduleEmailToSpool(email SpoolEmail) error {
+	q := `
+		UPDATE spool
+		SET send_at = ?,
+		    status = ?,
+		    updated_at = (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+		WHERE transaction_id = ?
+	`
+	db, err := s.getDB()
+	if err != nil {
+		return err
+	}
+
+	var delay = time.Hour
+	switch email.SendCount {
+	case 1:
+		delay = time.Minute
+	case 2:
+		delay = 15 * time.Minute
+	case 3:
+		delay = 30 * time.Minute
+	}
+	_, err = db.Exec(q, time.Now().Add(delay), BrevStatusQueued, email.TransactionId)
+	return err
+}
+
+func (s *sqlite) UpdateSendCount(email SpoolEmail) error {
+	q := `
+		UPDATE spool
+		SET send_count = ?,
+		    updated_at = (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+		WHERE transaction_id = ?
+	`
+	db, err := s.getDB()
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(q, email.SendCount, email.TransactionId)
+	return err
+
 }
 
 func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (err error) {
@@ -109,7 +154,8 @@ func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (err er
 func (s *sqlite) UpdateEmailBrevStatus(transactionId int64, statusBrev string) error {
 	q := `
 		UPDATE spool
-		SET status = ?
+		SET status = ?,
+		    updated_at = (strftime('%Y-%m-%d %H:%M:%f', 'now'))
 		WHERE transaction_id = ?
 		RETURNING message_id
 	`
@@ -141,9 +187,10 @@ func (s *sqlite) UpdateEmailBrevStatus(transactionId int64, statusBrev string) e
 func (s *sqlite) ClaimEmail(transactionId int64) (err error) {
 	q := `
 		UPDATE spool
-		SET status = 'processing'
+		SET status = ?,
+		    updated_at = (strftime('%Y-%m-%d %H:%M:%f', 'now'))
 		WHERE transaction_id = ?
-          AND status = 'queued'
+          AND status = ?
 		RETURNING message_id 
 	`
 
@@ -161,7 +208,7 @@ func (s *sqlite) ClaimEmail(transactionId int64) (err error) {
 	}()
 
 	var messageIds []string
-	err = tx.Select(&messageIds, q, transactionId)
+	err = tx.Select(&messageIds, q, BrevStatusProcessing, transactionId, BrevStatusQueued)
 	if err != nil {
 		return err
 	}
@@ -235,7 +282,8 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 	    SELECT *
 		FROM spool
 		WHERE send_at <= ?
-		  AND status = 'queued'
+		  AND status = ?
+	      AND send_count < 3
 		ORDER BY send_at
 		LIMIT ?
 	`
@@ -259,7 +307,7 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 		MXServers  string `db:"mx_servers"`
 	}
 
-	err = tx.Select(&intr, q1, time.Now().In(time.UTC), count)
+	err = tx.Select(&intr, q1, time.Now().In(time.UTC), BrevStatusQueued, count)
 	if err != nil {
 		return
 	}

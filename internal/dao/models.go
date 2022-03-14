@@ -7,6 +7,7 @@ type BrevStatus string
 const BrevStatusQueued = "queued"
 const BrevStatusProcessing = "processing"
 const BrevStatusSent = "sent"
+const BrevStatusFailed = "failed"
 
 type SpoolEmail struct {
 	TransactionId int64  `db:"transaction_id"`
