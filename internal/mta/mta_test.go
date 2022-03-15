@@ -12,6 +12,7 @@ import (
 	"github.com/modfin/brev/tools"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -34,12 +35,14 @@ type (
 	}
 	testDAO struct {
 		mu                       sync.Mutex
-		queuedMails              map[string]*dbMail
+		queuedMails              map[int64]*dbMail
+		mailContent              map[string][]byte
 		getEmailContentErr       error
 		updateEmailBrevStatusErr error
 		gotGetMessageId          string
-		gotUpdateMessageId       string
+		gotUpdateTransactionId   int64
 		gotUpdateStatus          string
+		log                      []string
 	}
 	sentEmail struct {
 		from string
@@ -52,33 +55,33 @@ var testErr = errors.New("test error")
 
 func TestMTA_worker(t *testing.T) {
 	type testCase struct {
-		name                string
-		messageId           string
-		recipients          []string
-		dialerErr           error
-		emailContentErr     error
-		lookupErr           error
-		sendErr             error
-		updateErr           error
-		sendDelay           time.Duration
-		wantDialed          bool
-		wantGetMessageId    string
-		wantUpdateMessageId string
-		wantSentFrom        string
-		wantSentTo          [][]string
-		wantStatus          string
+		name             string
+		messageId        string
+		recipients       []string
+		dialerErr        error
+		emailContentErr  error
+		lookupErr        error
+		sendErr          error
+		updateErr        error
+		sendDelay        time.Duration
+		wantDialed       bool
+		wantGetMessageId string
+		//wantUpdateMessageId string
+		wantSentFrom string
+		wantSentTo   [][]string
+		wantStatus   string
 	}
 	for _, tc := range []testCase{
 		{
-			name:                "happy flow",
-			messageId:           "test0",
-			recipients:          []string{"test1@localhost", "test2@127.0.0.1", "test3@localhost", "test4@127.0.0.1"},
-			wantGetMessageId:    "test0",
-			wantUpdateMessageId: "test0",
-			wantDialed:          true,
-			wantSentFrom:        "test@localhost",
-			wantSentTo:          [][]string{{"test1@localhost", "test3@localhost"}, {"test2@127.0.0.1", "test4@127.0.0.1"}},
-			wantStatus:          "sent",
+			name:             "happy flow",
+			messageId:        "test0",
+			recipients:       []string{"test1@localhost", "test2@127.0.0.1", "test3@localhost", "test4@127.0.0.1"},
+			wantGetMessageId: "test0",
+			//wantUpdateMessageId: "test0",
+			wantDialed:   true,
+			wantSentFrom: "test@localhost",
+			wantSentTo:   [][]string{{"test1@localhost", "test3@localhost"}, {"test2@127.0.0.1", "test4@127.0.0.1"}},
+			wantStatus:   "sent",
 		},
 		{
 			name:             "GetEmailContent error",
@@ -92,37 +95,37 @@ func TestMTA_worker(t *testing.T) {
 			wantGetMessageId: "test2",
 		},
 		{
-			name:                "lookup error",
-			messageId:           "test3",
-			lookupErr:           testErr,
-			wantGetMessageId:    "test3",
-			wantUpdateMessageId: "test3",
-			wantDialed:          false,
-			wantStatus:          "sent",
+			name:             "lookup error",
+			messageId:        "test3",
+			lookupErr:        testErr,
+			wantGetMessageId: "test3",
+			//wantUpdateMessageId: "test3",
+			wantDialed: false,
+			wantStatus: "sent",
 		},
 		{
-			name:                "send error",
-			messageId:           "test4",
-			recipients:          []string{"test@localhost"},
-			sendErr:             testErr,
-			wantGetMessageId:    "test4",
-			wantUpdateMessageId: "test4",
-			wantDialed:          true,
-			wantSentFrom:        "test@localhost",
-			wantSentTo:          [][]string{{"test@localhost"}},
-			wantStatus:          "sent",
+			name:             "send error",
+			messageId:        "test4",
+			recipients:       []string{"test@localhost"},
+			sendErr:          testErr,
+			wantGetMessageId: "test4",
+			//wantUpdateMessageId: "test4",
+			wantDialed:   true,
+			wantSentFrom: "test@localhost",
+			wantSentTo:   [][]string{{"test@localhost"}},
+			wantStatus:   "sent",
 		},
 		{
-			name:                "update error",
-			messageId:           "test4",
-			recipients:          []string{"test@localhost"},
-			updateErr:           testErr,
-			wantGetMessageId:    "test4",
-			wantUpdateMessageId: "test4",
-			wantDialed:          true,
-			wantSentFrom:        "test@localhost",
-			wantSentTo:          [][]string{{"test@localhost"}},
-			wantStatus:          "sent",
+			name:             "update error",
+			messageId:        "test4",
+			recipients:       []string{"test@localhost"},
+			updateErr:        testErr,
+			wantGetMessageId: "test4",
+			//wantUpdateMessageId: "test4",
+			wantDialed:   true,
+			wantSentFrom: "test@localhost",
+			wantSentTo:   [][]string{{"test@localhost"}},
+			wantStatus:   "sent",
 		},
 	} {
 		t.Run(tc.name, func(tc testCase) func(t *testing.T) {
@@ -155,9 +158,9 @@ func TestMTA_worker(t *testing.T) {
 				if testDao.gotGetMessageId != tc.wantGetMessageId {
 					t.Errorf("ERROR: got dao.GetEmailContent messageID: %s, want: %s", testDao.gotGetMessageId, tc.wantGetMessageId)
 				}
-				if testDao.gotUpdateMessageId != tc.wantUpdateMessageId {
-					t.Errorf("ERROR: got dao.UpdateEmailBrevStatus messageID: %s, want: %s", testDao.gotUpdateMessageId, tc.wantUpdateMessageId)
-				}
+				//if testDao.gotUpdateTransactionId != tc.wantUpdateMessageId {
+				//	t.Errorf("ERROR: got dao.UpdateEmailBrevStatus messageID: %s, want: %s", testDao.gotUpdateMessageId, tc.wantUpdateMessageId)
+				//}
 				if testDao.gotUpdateStatus != tc.wantStatus {
 					t.Errorf("ERROR: got dao.UpdateEmailBrevStatus status: %s, want: %s", testDao.gotUpdateStatus, tc.wantStatus)
 				}
@@ -241,7 +244,7 @@ func TestMTA(t *testing.T) {
 				// Queue mail
 				t.Logf("Adding mail to spool..")
 				for i, rcpt := range tc.emailRecipients {
-					testDao.AddEmailToSpool(spoolMail(fmt.Sprintf("%s-mail#%d", tc.name, i), tc.name, rcpt))
+					testDao.AddEmailToSpool(spoolMails(fmt.Sprintf("%s-mail#%d", tc.name, i), tc.name, rcpt))
 				}
 
 				// Informs MTA to wake up and start processing mail if a sleep at the moment.
@@ -298,13 +301,31 @@ func testLookup(lookupErr error) func(emails []string) []dnsx.TransferList {
 		return mx
 	}
 }
-func spoolMail(id, from string, recipients []string) (dao.SpoolEmail, []byte) {
-	return dao.SpoolEmail{
-		MessageId:  id,
-		From:       from,
-		Recipients: recipients,
-		SendAt:     time.Now().UTC(),
-	}, []byte(fmt.Sprintf("Subject: %s\r\ntest mail", id))
+
+func spoolMails(id, from string, recipients []string) ([]dao.SpoolEmail, []byte) {
+	var transactionId int64
+
+	var mails []dao.SpoolEmail
+
+	domainGroups := map[string][]string{}
+
+	for _, recipient := range recipients {
+		domain := strings.Split(recipient, "@")[1]
+		domainGroups[domain] = append(domainGroups[domain], recipient)
+	}
+
+	for _, addrs := range domainGroups {
+		transactionId += 1
+		mails = append(mails, dao.SpoolEmail{
+			TransactionId: transactionId,
+			MessageId:     id,
+			From:          from,
+			Recipients:    addrs,
+			SendAt:        time.Now().UTC(),
+		})
+	}
+
+	return mails, []byte(fmt.Sprintf("Subject: %s\r\ntest mail", id))
 }
 
 func (tc *testConnection) SendMail(from string, to []string, msg io.WriterTo) error {
@@ -333,18 +354,7 @@ func (tc *testConnection) Close() error {
 
 func (td *testDAO) GetApiKey(key string) (*dao.ApiKey, error) { return nil, nil }
 
-func (td *testDAO) AddEmailToSpool(email dao.SpoolEmail, content []byte) error {
-	td.mu.Lock()
-	defer td.mu.Unlock()
-
-	if td.queuedMails == nil {
-		td.queuedMails = make(map[string]*dbMail)
-	}
-	td.queuedMails[email.MessageId] = &dbMail{status: "queued", email: email, content: content}
-	return nil
-}
-
-func (td *testDAO) ClaimEmail(messageId string) error {
+func (td *testDAO) ClaimEmail(transactionId int64) error {
 	td.mu.Lock()
 	defer td.mu.Unlock()
 
@@ -352,12 +362,53 @@ func (td *testDAO) ClaimEmail(messageId string) error {
 		return nil
 	}
 
-	m := td.queuedMails[messageId]
+	m := td.queuedMails[transactionId]
 	if m.status != "queued" {
-		return fmt.Errorf("could not claim email %s, %d was affected by claim atempt", messageId, 0)
+		return fmt.Errorf("could not claim email %d, %d was affected by claim atempt", transactionId, 0)
 	}
 	m.status = "processing"
 	return nil
+}
+
+func (td *testDAO) UpdateSendCount(email dao.SpoolEmail) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (td *testDAO) AddEmailToSpool(spoolmails []dao.SpoolEmail, content []byte) error {
+	td.mu.Lock()
+	defer td.mu.Unlock()
+
+	if td.queuedMails == nil {
+		td.queuedMails = make(map[int64]*dbMail)
+	}
+
+	if td.mailContent == nil {
+		td.mailContent = map[string][]byte{}
+	}
+
+	for _, email := range spoolmails {
+		td.mailContent[email.MessageId] = content
+		td.queuedMails[email.TransactionId] = &dbMail{status: "queued", email: email, content: content}
+	}
+
+	return nil
+}
+
+func (td *testDAO) RescheduleEmailToSpool(spoolmail dao.SpoolEmail) error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (td *testDAO) AddSpoolSpecificLogEntry(messageId string, transactionId int64, log string) error {
+	//TODO implement me
+	td.log = append(td.log, fmt.Sprintf("[%s %d] %s", messageId, transactionId, log))
+	return nil
+}
+
+func (td *testDAO) AddSpoolLogEntry(messageId string, log string) error {
+	//TODO implement me
+	panic("implement me")
 }
 
 func (td *testDAO) GetEmailContent(messageId string) ([]byte, error) {
@@ -372,8 +423,8 @@ func (td *testDAO) GetEmailContent(messageId string) ([]byte, error) {
 		return []byte("test content"), nil
 	}
 
-	m := td.queuedMails[messageId]
-	return m.content, nil
+	content := td.mailContent[messageId]
+	return content, nil
 }
 
 func (td *testDAO) GetQueuedEmails(count int) (emails []dao.SpoolEmail, err error) {
@@ -395,16 +446,16 @@ func (td *testDAO) GetQueuedEmails(count int) (emails []dao.SpoolEmail, err erro
 	return emails, nil
 }
 
-func (td *testDAO) UpdateEmailBrevStatus(messageId string, statusBrev string) error {
+func (td *testDAO) UpdateEmailBrevStatus(transactionId int64, statusBrev string) error {
 	td.mu.Lock()
 	defer td.mu.Unlock()
 
 	if td.queuedMails == nil {
-		td.gotUpdateMessageId = messageId
+		td.gotUpdateTransactionId = transactionId
 		td.gotUpdateStatus = statusBrev
 		return td.updateEmailBrevStatusErr
 	}
 
-	td.queuedMails[messageId].status = statusBrev
+	td.queuedMails[transactionId].status = statusBrev
 	return nil
 }

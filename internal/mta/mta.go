@@ -172,7 +172,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 		}
 
 		if len(spoolmail.MXServers) == 0 {
-			logger.Logf("could not find mx server for %v", workerId, spoolmail.Recipients)
+			logger.Logf("could not find mx server for %v", spoolmail.Recipients)
 			err = m.db.UpdateEmailBrevStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
 			if err != nil {
 				logger.Logf("got error updating status, err %v", err)
@@ -182,6 +182,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 		// TODO iterate over mx servers i failing to connect...
 		addr := spoolmail.MXServers[0] + ":25"
 
+		// Important, send count is used to determine retry timers and such
 		spoolmail.SendCount = spoolmail.SendCount + 1
 		err = m.db.UpdateSendCount(spoolmail)
 		if err != nil {
@@ -191,7 +192,6 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 		start := time.Now()
 		err = m.pool.SendMail(logger, addr, spoolmail.From, spoolmail.Recipients, bytes.NewBuffer(content))
-
 		stop := time.Since(start)
 
 		if err != nil {
@@ -234,7 +234,6 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 			//switch terr.Code {
 			//// Dealing with gray listing
-			//// 4xy  - should retransmit 1,5,30 minutes or later after a failure,
 			//case 421: // Service not available, closing transmission channel (This may be a reply to any command if the service knows it must shut down)
 			//case 432: // 4.7.12 A password transition is needed [3]
 			//case 450: // Requested mail action not taken: mailbox unavailable (e.g., mailbox busy or temporarily blocked for policy reasons)
