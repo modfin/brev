@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
+func Init(ctx context.Context, db dao.DAO, cfg *config.Config) (done chan interface{}) {
 	fmt.Println("[API]: Starting API")
 
 	done = make(chan interface{})
@@ -25,7 +25,7 @@ func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
 		})
 	}
 
-	signer, err := dkim.NewSigner(config.Get().DKIMPrivetKey)
+	signer, err := dkim.NewSigner(cfg.DKIMPrivetKey)
 	if err != nil {
 		fmt.Println("[API]: Failed to load dkim private key, emails wont be signed using dkim, err;", err)
 	}
@@ -35,7 +35,6 @@ func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
 	prom := prometheus.NewPrometheus("echo", nil)
 	e.Use(middleware.Logger(), prom.HandlerFunc)
 
-	cfg := config.Get()
 	e.POST("/mta", EnqueueMTA(db, cfg.DKIMSelector, signer, cfg.Hostname, cfg.MXDomain, dnsx.LookupEmailMX))
 	//e.GET("/mta")            // returns list of sent emails
 	//e.GET("/mta/:messageId") // returns log of specific email
@@ -53,7 +52,7 @@ func Init(ctx context.Context, db dao.DAO) (done chan interface{}) {
 	}()
 
 	go func() {
-		err := e.Start(":1234")
+		err := e.Start(fmt.Sprintf(":%d", cfg.APIPort))
 		if err != nil {
 			fmt.Println("[API]: stopped err,", err)
 		}

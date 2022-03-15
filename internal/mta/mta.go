@@ -180,7 +180,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 			continue
 		}
 		// TODO iterate over mx servers i failing to connect...
-		addr := spoolmail.MXServers[0] + ":25"
+		addr := spoolmail.MXServers[0]
 
 		// Important, send count is used to determine retry timers and such
 		spoolmail.SendCount = spoolmail.SendCount + 1

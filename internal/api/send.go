@@ -13,6 +13,7 @@ import (
 	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/modfin/brev/tools"
 	"net/mail"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -155,7 +156,15 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 			return fmt.Errorf("failed to find recipiants mx servers, err %v", err)
 		}
 
-		err = db.AddEmailToSpool(spoolmails, content)
+		// Check that context is not canceled before committing to send email.
+		select {
+		case <-c.Request().Context().Done():
+			return c.Request().Context().Err()
+		default:
+
+		}
+
+		transactionIds, err := db.AddEmailToSpool(spoolmails, content)
 
 		if err != nil {
 			return fmt.Errorf("failed to add to spool, err %v", err)
@@ -164,6 +173,13 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 		// Informs MTA to wake up and start processing mail if a sleep at the moment.
 		signals.Broadcast(signals.NewMailInSpool)
 
-		return c.JSONBlob(200, []byte(fmt.Sprintf(`{"message_id": "%s" }`, messageId)))
+		var strTranIds []string
+		for _, id := range transactionIds {
+			strTranIds = append(strTranIds, strconv.FormatInt(id, 10))
+		}
+		return c.JSON(200, brev.Receipt{
+			MessageId:      messageId,
+			TransactionIds: transactionIds,
+		})
 	}
 }

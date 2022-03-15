@@ -20,6 +20,7 @@ type Config struct {
 
 	DKIMSelector  string `env:"BREV_DKIM_SELECTOR" envDefault:"brev"` // eg brevcc._domainkey.example.com should contain dkim pub record
 	DKIMPrivetKey string `env:"BREV_DKIM_PRIVATE_KEY,file" envDefault:"dkim-private.pem"`
+	APIPort       int    `env:"BREV_API_PORT" envDefault:"8080"`
 }
 
 var (

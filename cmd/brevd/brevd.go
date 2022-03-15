@@ -29,7 +29,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiDone := api.Init(ctx, db)
+	apiDone := api.Init(ctx, db, cfg)
 	_, err = msa.New(ctx, db, config.Get())
 	if err != nil {
 		fmt.Println("could not start MSA", cfg.DbURI)

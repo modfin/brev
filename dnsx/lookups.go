@@ -35,7 +35,7 @@ func LookupEmailMX(emails []string) []TransferList {
 		})
 		var servers []string
 		for _, rec := range recs {
-			servers = append(servers, rec.Host)
+			servers = append(servers, rec.Host+":25")
 		}
 
 		mx = append(mx, TransferList{

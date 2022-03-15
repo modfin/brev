@@ -10,6 +10,7 @@ import (
 )
 
 type DAO interface {
+	UpsertApiKey(*ApiKey) error
 	GetApiKey(key string) (*ApiKey, error)
 	GetQueuedEmails(count int) (emails []SpoolEmail, err error)
 	ClaimEmail(transactionId int64) error
@@ -17,7 +18,7 @@ type DAO interface {
 	UpdateSendCount(email SpoolEmail) error
 
 	GetEmailContent(messageId string) ([]byte, error)
-	AddEmailToSpool(spoolmails []SpoolEmail, content []byte) error
+	AddEmailToSpool(spoolmails []SpoolEmail, content []byte) ([]int64, error)
 	RescheduleEmailToSpool(spoolmail SpoolEmail) error
 
 	AddSpoolSpecificLogEntry(messageId string, transactionId int64, log string) error
@@ -77,10 +78,10 @@ func (s *sqlite) UpdateSendCount(email SpoolEmail) error {
 
 }
 
-func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (err error) {
+func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (transactionIds []int64, err error) {
 
 	if len(transfers) == 0 {
-		return errors.New("transfer list must be greater than 0")
+		return nil, errors.New("transfer list must be greater than 0")
 	}
 
 	var tx *sqlx.Tx
@@ -110,7 +111,7 @@ func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (err er
 	}
 	err = s.AddSpoolLogEntryTx(tx, messageId, "email content has been added into spool_content")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	q1 := `
@@ -141,6 +142,7 @@ func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (err er
 			return
 		}
 
+		transactionIds = append(transactionIds, transactionId)
 		err = s.AddSpoolSpecificLogEntryTx(tx, messageId, transactionId, "transfer list has been added to spool")
 		if err != nil {
 			err = fmt.Errorf("failed to insert log entry, err %v", err)
@@ -323,6 +325,17 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 	}
 
 	return emails, err
+}
+
+func (s *sqlite) UpsertApiKey(key *ApiKey) error {
+	q := `INSERT INTO api_key (api_key, domain, mx_cname) 
+		  VALUES (?, ?, ?)`
+	db, err := s.getDB()
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(q, key.Key, key.Domain, key.MxCNAME)
+	return err
 }
 
 func (s *sqlite) GetApiKey(key string) (*ApiKey, error) {
