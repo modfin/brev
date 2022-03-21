@@ -216,7 +216,7 @@ func (s *sqlite) ClaimEmail(transactionId int64) (err error) {
 	}
 
 	if len(messageIds) != 1 {
-		err = fmt.Errorf("could not claim email transaction id %s, %d was affected by claim atempt", transactionId, len(messageIds))
+		err = fmt.Errorf("could not claim email transaction id %d, %d was affected by claim atempt", transactionId, len(messageIds))
 		return
 	}
 

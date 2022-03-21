@@ -12,6 +12,7 @@ import (
 	"github.com/modfin/brev/smtpx"
 	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/modfin/brev/tools"
+	"github.com/modfin/henry/slicez"
 	"github.com/urfave/cli/v2"
 	"os"
 	"path/filepath"
@@ -244,7 +245,7 @@ func sendmail(c *cli.Context) (err error) {
 			continue
 		}
 
-		mx.Emails = tools.Uniq(mx.Emails)
+		mx.Emails = slicez.Uniq(mx.Emails)
 		addr := mx.MXServers[0] + ":25"
 		fmt.Println("Transferring emails for", mx.Domain, "to mx", "smtp://"+addr)
 		for _, t := range mx.Emails {

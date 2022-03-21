@@ -23,20 +23,6 @@ func SystemUri() (string, error) {
 	return fmt.Sprintf("%s@%s", username, hostname), nil
 }
 
-func Uniq(strs []string) []string {
-	set := make(map[string]struct{})
-
-	for _, s := range strs {
-		set[s] = struct{}{}
-	}
-	var res []string
-	for s := range set {
-		res = append(res, s)
-	}
-
-	return res
-}
-
 func DomainOfEmail(address string) (string, error) {
 	parts := strings.Split(address, "@")
 	if len(parts) < 2 {

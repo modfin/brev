@@ -2,8 +2,8 @@ package dnsx
 
 import (
 	"github.com/modfin/brev/tools"
+	"github.com/modfin/henry/slicez"
 	"net"
-	"sort"
 )
 
 type TransferList struct {
@@ -18,25 +18,23 @@ type MXLookup func(emails []string) []TransferList
 func LookupEmailMX(emails []string) []TransferList {
 	var mx []TransferList
 
-	var buckets = map[string][]string{}
-
-	for _, address := range emails {
-		domain, err := tools.DomainOfEmail(address)
+	var buckets map[string][]string = slicez.GroupBy(emails, func(email string) string {
+		domain, err := tools.DomainOfEmail(email)
 		if err != nil {
-			continue
+			return ""
 		}
-		buckets[domain] = append(buckets[domain], address)
-	}
+		return domain
+	})
+	delete(buckets, "")
 
 	for domain, addresses := range buckets {
 		recs, err := net.LookupMX(domain)
-		sort.Slice(recs, func(i, j int) bool {
-			return recs[i].Pref < recs[j].Pref
+		slicez.SortFunc(recs, func(i, j *net.MX) bool {
+			return i.Pref < j.Pref
 		})
-		var servers []string
-		for _, rec := range recs {
-			servers = append(servers, rec.Host+":25")
-		}
+		var servers []string = slicez.Map(recs, func(rec *net.MX) string {
+			return rec.Host + ":25"
+		})
 
 		mx = append(mx, TransferList{
 			Domain:    domain,

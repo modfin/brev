@@ -13,7 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
-	"github.com/modfin/brev/tools"
+	"github.com/modfin/henry/slicez"
 	"hash"
 	"regexp"
 	"sort"
@@ -133,7 +133,7 @@ func (s *Signer) Sign(email *[]byte) error {
 	for _, op := range s.mods {
 		op(&options)
 	}
-	options.Headers = tools.Uniq(options.Headers)
+	options.Headers = slicez.Uniq(options.Headers)
 	sort.Strings(options.Headers)
 	return Sign(email, options, s.privateKey)
 }

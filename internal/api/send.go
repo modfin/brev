@@ -12,8 +12,8 @@ import (
 	"github.com/modfin/brev/smtpx/dkim"
 	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/modfin/brev/tools"
+	"github.com/modfin/henry/slicez"
 	"net/mail"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -46,11 +46,7 @@ func validateFrom(key *dao.ApiKey, email *brev.Email) error {
 
 func validateRecipients(email *brev.Email) error {
 
-	addresses := append([]brev.Address(nil), email.To...)
-	addresses = append(addresses, email.Cc...)
-	addresses = append(addresses, email.Bcc...)
-
-	for _, a := range addresses {
+	for _, a := range slicez.Concat(email.To, email.Cc, email.Bcc) {
 		_, err := mail.ParseAddress(a.String())
 		if err != nil {
 			return fmt.Errorf("email %s, is not a valid email address", a.String())
@@ -135,23 +131,26 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 			return fmt.Errorf("failed to marshal envelop, err %v", err)
 		}
 
-		var spoolmails []dao.SpoolEmail
 		transferlist := emailMxLookup(email.Recipients())
 
-		for _, transfer := range transferlist {
+		var spoolmails []dao.SpoolEmail = slicez.Map(transferlist, func(transfer dnsx.TransferList) (d dao.SpoolEmail) {
 			if transfer.Err != nil {
 				err = transfer.Err
 				fmt.Printf("[API] got error from dns lookup, %v", err)
-				continue
+				return
 			}
-			spoolmails = append(spoolmails, dao.SpoolEmail{
+			return dao.SpoolEmail{
 				MessageId:  messageId,
 				ApiKey:     key.Key,
 				From:       returnPath, // From here is used in the smtp process and the return-path will be added by the receiver
 				Recipients: transfer.Emails,
 				MXServers:  transfer.MXServers,
-			})
-		}
+			}
+		})
+		spoolmails = slicez.Reject(spoolmails, func(a dao.SpoolEmail) bool {
+			return a.MessageId == ""
+		})
+
 		if len(spoolmails) == 0 && err != nil {
 			return fmt.Errorf("failed to find recipiants mx servers, err %v", err)
 		}
@@ -173,10 +172,6 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 		// Informs MTA to wake up and start processing mail if a sleep at the moment.
 		signals.Broadcast(signals.NewMailInSpool)
 
-		var strTranIds []string
-		for _, id := range transactionIds {
-			strTranIds = append(strTranIds, strconv.FormatInt(id, 10))
-		}
 		return c.JSON(200, brev.Receipt{
 			MessageId:      messageId,
 			TransactionIds: transactionIds,
