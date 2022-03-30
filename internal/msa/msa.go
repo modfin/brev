@@ -6,9 +6,12 @@ import (
 	"github.com/flashmob/go-guerrilla"
 	"github.com/flashmob/go-guerrilla/backends"
 	"github.com/flashmob/go-guerrilla/mail"
+	"github.com/modfin/brev"
 	"github.com/modfin/brev/internal/config"
 	"github.com/modfin/brev/internal/dao"
 	"regexp"
+	"strconv"
+	"strings"
 )
 
 // Mail Submission Agent, aka SMTP server :)
@@ -18,13 +21,16 @@ type MSA struct {
 	cfg       *guerrilla.AppConfig
 	servercfg guerrilla.ServerConfig
 	daemon    guerrilla.Daemon
+	db        dao.DAO
 }
 
 func New(ctx context.Context, db dao.DAO, cfg *config.Config) (*MSA, error) {
 
 	fmt.Printf("[MSA]: Starting mail submission agent")
 
-	m := MSA{}
+	m := MSA{
+		db: db,
+	}
 
 	m.cfg = &guerrilla.AppConfig{}
 	m.servercfg = guerrilla.ServerConfig{
@@ -41,13 +47,43 @@ func New(ctx context.Context, db dao.DAO, cfg *config.Config) (*MSA, error) {
 	m.cfg.AllowedHosts = []string{"."} // Wildcard host recip, enforce this in processing instead.
 	m.cfg.LogLevel = "info"
 	m.daemon = guerrilla.Daemon{Config: m.cfg}
-	m.daemon.Backend = &backend{}
+	m.daemon.Backend = &backend{
+		db: db,
+	}
 	return &m, m.daemon.Start()
 }
 
-func handleBounce(transactionIds []string, e *mail.Envelope) backends.Result {
-	// TODO implement bounce logic here....
-	fmt.Printf("Got bounce for %v\n", transactionIds)
+func handleBounce(db dao.DAO, bounceAddresses []string) backends.Result {
+
+	for _, address := range bounceAddresses {
+		address = strings.TrimPrefix(address, "bounces_")
+		parts := strings.Split(address, "=")
+		if len(parts) > 2 {
+			continue
+		}
+		messageId := parts[0] + "=" + parts[1]
+		transactionId, err := strconv.ParseInt(strings.Split(parts[2], "@")[0], 10, 64)
+		if err != nil {
+			continue // TODO log or something...
+		}
+
+		err = db.AddSpecificLogEntry(messageId, transactionId, "got bounce through msa")
+		if err != nil {
+			continue // TODO log or something...
+		}
+
+		err = db.SetEmailStatus(transactionId, dao.BrevStatusFailed)
+		if err != nil {
+			continue // TODO log or something...
+		}
+
+		email, err := db.GetEmail(transactionId)
+		if err != nil {
+			continue // TODO log or something...
+		}
+		err = db.EnqueuePosthook(email, brev.EventBounce, "got bounce through msa")
+	}
+
 	return backends.NewResult("250 OK: Message received")
 }
 
@@ -58,7 +94,9 @@ func handleSendRequest(e *mail.Envelope) backends.Result {
 
 type ListInterface interface{}
 
-type backend struct{}
+type backend struct {
+	db dao.DAO
+}
 
 // Process processes then saves the mail envelope
 func (b *backend) Process(e *mail.Envelope) (result backends.Result) {
@@ -85,7 +123,7 @@ func (b *backend) Process(e *mail.Envelope) (result backends.Result) {
 		}
 	}
 	if len(bounces) > 0 {
-		return handleBounce(bounces, e)
+		return handleBounce(b.db, bounces)
 	}
 
 	return backends.NewResult("550 Requested action not taken: mailbox unavailable")

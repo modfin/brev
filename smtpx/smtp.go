@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/modfin/henry/slicez"
 	"io"
 	"net"
 	"net/textproto"
@@ -443,18 +444,22 @@ func (c *connection) SendMail(from string, to []string, msg io.WriterTo) (err er
 		_ = c.client.Reset()
 		return err
 	}
-	existing := 0
+	var errs []error
 	for _, addr := range to {
 		if err = c.client.Rcpt(addr); err != nil {
+			errs = append(errs, err)
 			// If a recipient does not exist. just keep going with the others
 			continue
 		}
-		existing += 1
 	}
 
-	if existing == 0 {
+	// No recipient on the other end...
+	if len(to) == len(errs) {
 		_ = c.client.Reset()
-		return err
+		msgs := slicez.Map(errs, func(e error) string {
+			return err.Error()
+		})
+		return errors.New(strings.Join(msgs, ";"))
 	}
 
 	w, err := c.client.Data()

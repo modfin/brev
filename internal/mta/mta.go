@@ -98,7 +98,7 @@ func (m *MTA) start(workers int) error {
 
 	for {
 
-		emails, err := m.db.GetQueuedEmails(workers * 2)
+		emails, err := m.db.DequeueEmails(workers * 2)
 
 		if err != nil {
 			fmt.Println(err)
@@ -109,11 +109,6 @@ func (m *MTA) start(workers int) error {
 		}
 
 		for _, email := range emails {
-			err := m.db.ClaimEmail(email.TransactionId)
-			if err != nil {
-				fmt.Printf("could not claim email %s, %v\n", email.MessageId, err)
-				continue
-			}
 			spool <- email
 		}
 
@@ -145,10 +140,8 @@ type lg struct {
 func (l *lg) Logf(format string, args ...interface{}) {
 	log := fmt.Sprintf(format, args...)
 	log = fmt.Sprintf("[MTA-Worker %s]: %s", l.workerId, log)
-	// todo remove debugging line
 	log = strings.ReplaceAll(log, "\n", "; ")
-	fmt.Println(log, "[", l.messageId, l.transactionId, "]")
-	err := l.db.AddSpoolSpecificLogEntry(l.messageId, l.transactionId, log)
+	err := l.db.AddSpecificLogEntry(l.messageId, l.transactionId, log)
 	if err != nil {
 		fmt.Println("could not save log entry for", l.messageId, l.transactionId)
 	}
@@ -173,7 +166,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 		content, err := m.db.GetEmailContent(spoolmail.MessageId)
 		if err != nil {
 			logger.Logf("could not retrieve raw content of mail %s, err %v", spoolmail.MessageId, err)
-			err = m.db.UpdateEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+			err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
 			if err != nil {
 				logger.Logf("got error updating status, err %v", err)
 			}
@@ -182,7 +175,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 		if len(spoolmail.MXServers) == 0 {
 			logger.Logf("could not find mx server for %v", spoolmail.Recipients)
-			err = m.db.UpdateEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+			err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
 			if err != nil {
 				logger.Logf("got error updating status, err %v", err)
 			}
@@ -191,9 +184,6 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 		// TODO iterate over mx servers i failing to connect...
 		addr := spoolmail.MXServers[0]
 
-		// Important, send count is used to determine retry timers and such
-		spoolmail.SendCount = spoolmail.SendCount + 1
-		err = m.db.UpdateEmailSendCount(spoolmail)
 		if err != nil {
 			logger.Logf("got error updating send count, err %v", err)
 			continue
@@ -208,7 +198,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 			if !ok {
 				logger.Logf("failed transfer of emails for %v, err %v", spoolmail.Recipients, err)
-				err = m.db.UpdateEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+				err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
 				if err != nil {
 					logger.Logf("got error updating status, err %v", err)
 				}
@@ -229,7 +219,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 			case 4: // might be graylising
 				if spoolmail.SendCount > 2 {
 					logger.Logf("failing transaction after third attempt, got code %d: %s ", terr.Code, terr.Msg)
-					err = m.db.UpdateEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+					err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
 					if err != nil {
 						logger.Logf("got error updating status, err %v", err)
 					}
@@ -256,7 +246,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 			case 5:
 				logger.Logf("failing transaction got code %d: %s ", terr.Code, terr.Msg)
-				err = m.db.UpdateEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+				err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
 				if err != nil {
 					logger.Logf("got error updating status, err %v", err)
 				}
@@ -271,7 +261,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 		}
 		logger.Logf("transferred emails through %s for %v, took %v", addr, spoolmail.Recipients, stop)
 
-		err = m.db.UpdateEmailStatus(spoolmail.TransactionId, dao.BrevStatusSent)
+		err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusSent)
 		if err != nil {
 			logger.Logf("could not update status to sent for %s, err %v\n", spoolmail.MessageId, err)
 			continue

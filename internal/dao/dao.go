@@ -8,6 +8,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/modfin/brev"
 	"github.com/modfin/brev/internal/signals"
+	"math/rand"
 	"strconv"
 	"strings"
 	"time"
@@ -17,20 +18,16 @@ type DAO interface {
 	UpsertApiKey(*ApiKey) error
 	GetApiKey(key string) (*ApiKey, error)
 
-	EnqueueEmail(spoolmails []SpoolEmail, content []byte) ([]int64, error)
+	EnqueueEmails(emails []SpoolEmail, content []byte) ([]int64, error)
+	DequeueEmails(count int) (emails []SpoolEmail, err error)
+	RequeueEmail(emails SpoolEmail) error
 
-	RequeueEmail(spoolmail SpoolEmail) error
-
-	GetQueuedEmails(count int) (emails []SpoolEmail, err error)
-	ClaimEmail(transactionId int64) error
-
-	UpdateEmailStatus(transactionId int64, statusBrev string) error
-	UpdateEmailSendCount(email SpoolEmail) error
-
+	SetEmailStatus(transactionId int64, statusBrev string) error
+	GetEmail(transactionId int64) (SpoolEmail, error)
 	GetEmailContent(messageId string) ([]byte, error)
 
-	AddSpoolSpecificLogEntry(messageId string, transactionId int64, log string) error
-	AddSpoolLogEntry(messageId string, log string) error
+	AddSpecificLogEntry(messageId string, transactionId int64, log string) error
+	AddLogEntry(messageId string, log string) error
 
 	EnqueuePosthook(email SpoolEmail, event brev.PosthookEvent, message string) error
 	DequeuePosthook(count int) ([]Posthook, error)
@@ -113,49 +110,7 @@ func (s *sqlite) EnqueuePosthook(email SpoolEmail, event brev.PosthookEvent, mes
 	return err
 }
 
-func (s *sqlite) RequeueEmail(email SpoolEmail) error {
-	q := `
-		UPDATE spool
-		SET send_at = ?,
-		    status = ?,
-		    updated_at = (strftime('%Y-%m-%d %H:%M:%f', 'now'))
-		WHERE transaction_id = ?
-	`
-	db, err := s.getDB()
-	if err != nil {
-		return err
-	}
-
-	var delay = time.Hour
-	switch email.SendCount {
-	case 1:
-		delay = time.Minute
-	case 2:
-		delay = 15 * time.Minute
-	case 3:
-		delay = 30 * time.Minute
-	}
-	_, err = db.Exec(q, time.Now().Add(delay), BrevStatusQueued, email.TransactionId)
-	return err
-}
-
-func (s *sqlite) UpdateEmailSendCount(email SpoolEmail) error {
-	q := `
-		UPDATE spool
-		SET send_count = ?,
-		    updated_at = (strftime('%Y-%m-%d %H:%M:%f', 'now'))
-		WHERE transaction_id = ?
-	`
-	db, err := s.getDB()
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(q, email.SendCount, email.TransactionId)
-	return err
-
-}
-
-func (s *sqlite) EnqueueEmail(transfers []SpoolEmail, content []byte) (transactionIds []int64, err error) {
+func (s *sqlite) EnqueueEmails(transfers []SpoolEmail, content []byte) (transactionIds []int64, err error) {
 
 	if len(transfers) == 0 {
 		return nil, errors.New("transfer list must be greater than 0")
@@ -220,7 +175,7 @@ func (s *sqlite) EnqueueEmail(transfers []SpoolEmail, content []byte) (transacti
 		}
 
 		// Since we need to know what specific email that bounced, we need to keep trac of transaction id in bounce email.
-		transfer.From = strings.Replace(transfer.From, "=", "="+strconv.FormatInt(transactionId, 10)+"=", 1)
+		transfer.From = strings.Replace(transfer.From, "@", "="+strconv.FormatInt(transactionId, 10)+"@", 1)
 		_, err = tx.Exec(`UPDATE spool SET from_ = ? WHERE transaction_id = ?`, transfer.From, transactionId)
 		if err != nil {
 			err = fmt.Errorf("failed to update from after initial insert, err %v", err)
@@ -238,7 +193,89 @@ func (s *sqlite) EnqueueEmail(transfers []SpoolEmail, content []byte) (transacti
 	return
 }
 
-func (s *sqlite) UpdateEmailStatus(transactionId int64, statusBrev string) error {
+func (s *sqlite) DequeueEmails(limit int) (emails []SpoolEmail, err error) {
+	q1 := `
+		WITH mails AS (
+		    SELECT transaction_id
+			FROM spool
+			WHERE send_count < 3
+			  AND send_at <= ?
+			  AND status = ?
+			ORDER BY send_at
+			LIMIT ?
+		)
+		UPDATE spool
+		SET status = ?,
+		    send_count = send_count + 1,
+		    updated_at = (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+		WHERE transaction_id IN (SELECT m.transaction_id FROM mails m )
+		RETURNING *
+	`
+	var tx *sqlx.Tx
+	tx, err = s.getTX()
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		if err == nil {
+			err = tx.Commit()
+			return
+		}
+		_ = tx.Rollback()
+	}()
+
+	var intr []struct {
+		SpoolEmail
+		Recipients string `db:"recipients"`
+		MXServers  string `db:"mx_servers"`
+	}
+
+	err = tx.Select(&intr, q1, time.Now().In(time.UTC), BrevStatusQueued, limit, BrevStatusProcessing)
+	if err != nil {
+		return
+	}
+
+	for _, mail := range intr {
+		mail.SpoolEmail.Recipients = strings.Split(mail.Recipients, " ")
+		mail.SpoolEmail.MXServers = strings.Split(mail.MXServers, " ")
+		emails = append(emails, mail.SpoolEmail)
+		err = s.AddSpoolSpecificLogEntryTx(tx, mail.MessageId, mail.TransactionId, "retrieved from queue")
+		if err != nil {
+			return
+		}
+	}
+
+	return emails, err
+}
+
+func (s *sqlite) RequeueEmail(email SpoolEmail) error {
+	q := `
+		UPDATE spool
+		SET send_at = ?,
+		    status = ?,
+		    updated_at = (strftime('%Y-%m-%d %H:%M:%f', 'now'))
+		WHERE transaction_id = ?
+	`
+	db, err := s.getDB()
+	if err != nil {
+		return err
+	}
+
+	var delay = time.Hour
+	switch email.SendCount {
+	case 1:
+		delay = time.Minute + time.Second*time.Duration(rand.Intn(60)) // between 1-2 min
+	case 2:
+		delay = 15*time.Minute + time.Second*time.Duration(rand.Intn(180)) // between 15-17 min
+	case 3:
+		delay = 30*time.Minute + time.Second*time.Duration(rand.Intn(300)) // between 30-35 min
+	}
+	_, err = db.Exec(q, time.Now().Add(delay), BrevStatusQueued, email.TransactionId)
+	return err
+}
+
+func (s *sqlite) SetEmailStatus(transactionId int64, statusBrev string) error {
 	q := `
 		UPDATE spool
 		SET status = ?,
@@ -271,56 +308,15 @@ func (s *sqlite) UpdateEmailStatus(transactionId int64, statusBrev string) error
 	return nil
 }
 
-func (s *sqlite) ClaimEmail(transactionId int64) (err error) {
-	q := `
-		UPDATE spool
-		SET status = ?,
-		    updated_at = (strftime('%Y-%m-%d %H:%M:%f', 'now'))
-		WHERE transaction_id = ?
-          AND status = ?
-		RETURNING message_id 
-	`
-
-	var tx *sqlx.Tx
-	tx, err = s.getTX()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err == nil {
-			err = tx.Commit()
-			return
-		}
-		_ = tx.Rollback()
-	}()
-
-	var messageIds []string
-	err = tx.Select(&messageIds, q, BrevStatusProcessing, transactionId, BrevStatusQueued)
-	if err != nil {
-		return err
-	}
-
-	if len(messageIds) != 1 {
-		err = fmt.Errorf("could not claim email transaction id %d, %d was affected by claim atempt", transactionId, len(messageIds))
-		return
-	}
-
-	messageId := messageIds[0]
-
-	err = s.AddSpoolSpecificLogEntryTx(tx, messageId, transactionId, "claimed by internal spool")
-	return
-
-}
-
-func (s *sqlite) AddSpoolLogEntry(messageId, log string) error {
-	return s.AddSpoolSpecificLogEntry(messageId, 0, log)
+func (s *sqlite) AddLogEntry(messageId, log string) error {
+	return s.AddSpecificLogEntry(messageId, 0, log)
 }
 
 func (s *sqlite) AddSpoolLogEntryTx(tx *sqlx.Tx, messageId, log string) error {
 	return s.AddSpoolSpecificLogEntryTx(tx, messageId, 0, log)
 }
 
-func (s *sqlite) AddSpoolSpecificLogEntry(messageId string, transactionId int64, log string) error {
+func (s *sqlite) AddSpecificLogEntry(messageId string, transactionId int64, log string) error {
 	tx, err := s.getTX()
 	if err != nil {
 		return err
@@ -353,6 +349,16 @@ func (s *sqlite) AddSpoolSpecificLogEntryTx(tx *sqlx.Tx, messageId string, trans
 
 }
 
+func (s *sqlite) GetEmail(transactionId int64) (email SpoolEmail, err error) {
+	q := `SELECT * FROM spool WHERE transaction_id = ?`
+	db, err := s.getDB()
+	if err != nil {
+		return email, err
+	}
+	err = db.Get(&email, q, transactionId)
+	return email, err
+}
+
 func (s *sqlite) GetEmailContent(messageId string) ([]byte, error) {
 	q := `SELECT content FROM spool_content WHERE message_id = ?`
 	db, err := s.getDB()
@@ -362,54 +368,6 @@ func (s *sqlite) GetEmailContent(messageId string) ([]byte, error) {
 	var content string
 	err = db.Get(&content, q, messageId)
 	return []byte(content), err
-}
-
-func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
-	q1 := `
-	    SELECT *
-		FROM spool
-		WHERE send_at <= ?
-		  AND status = ?
-	      AND send_count < 3
-		ORDER BY send_at
-		LIMIT ?
-	`
-	var tx *sqlx.Tx
-	tx, err = s.getTX()
-	if err != nil {
-		return
-	}
-
-	defer func() {
-		if err == nil {
-			err = tx.Commit()
-			return
-		}
-		_ = tx.Rollback()
-	}()
-
-	var intr []struct {
-		SpoolEmail
-		Recipients string `db:"recipients"`
-		MXServers  string `db:"mx_servers"`
-	}
-
-	err = tx.Select(&intr, q1, time.Now().In(time.UTC), BrevStatusQueued, count)
-	if err != nil {
-		return
-	}
-
-	for _, mail := range intr {
-		mail.SpoolEmail.Recipients = strings.Split(mail.Recipients, " ")
-		mail.SpoolEmail.MXServers = strings.Split(mail.MXServers, " ")
-		emails = append(emails, mail.SpoolEmail)
-		err = s.AddSpoolSpecificLogEntryTx(tx, mail.MessageId, mail.TransactionId, "retrieved from queue")
-		if err != nil {
-			return
-		}
-	}
-
-	return emails, err
 }
 
 func (s *sqlite) UpsertApiKey(key *ApiKey) error {
