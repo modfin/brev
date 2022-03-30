@@ -3,6 +3,7 @@ package tools
 import (
 	"errors"
 	"fmt"
+	"github.com/modfin/henry/slicez"
 	"math/rand"
 	"os"
 	"os/user"
@@ -28,7 +29,7 @@ func DomainOfEmail(address string) (string, error) {
 	if len(parts) < 2 {
 		return "", errors.New("no domain was present in email address")
 	}
-	return parts[len(parts)-1], nil
+	return slicez.Nth(parts, -1), nil
 }
 
 var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890")

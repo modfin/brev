@@ -9,16 +9,16 @@ import (
 	"strings"
 )
 
-func NewClient(apiKey string, url string) *Client {
-	url = strings.TrimRight(url, "/")
+func NewClient(apiKey string, host string) *Client {
+	host = strings.TrimRight(host, "/")
 	return &Client{
-		url:    url,
+		host:   host,
 		apiKey: apiKey,
 	}
 }
 
 type Client struct {
-	url    string
+	host   string
 	apiKey string
 }
 
@@ -34,7 +34,7 @@ func (c *Client) Send(ctx context.Context, email *Email) (Receipt, error) {
 		return Receipt{}, err
 	}
 
-	req, err := http.NewRequest("POST", c.url+"/mta", bytes.NewBuffer(body))
+	req, err := http.NewRequest("POST", c.host+"/mta?key="+c.apiKey, bytes.NewBuffer(body))
 	if err != nil {
 		return Receipt{}, err
 	}

@@ -1,6 +1,7 @@
 package signals
 
 import (
+	"github.com/modfin/henry/slicez"
 	"math/rand"
 	"sync"
 )
@@ -8,6 +9,7 @@ import (
 type Signal string
 
 const NewMailInSpool Signal = "new-mail-in-spool"
+const NewPosthook Signal = "new-posthook"
 
 var mu sync.RWMutex
 var sigs = map[Signal][]chan struct{}{}
@@ -45,15 +47,10 @@ func Listen(channel Signal) (signal <-chan struct{}, cancel func()) {
 
 	return c, func() {
 		mu.Lock()
-		defer mu.Lock()
+		defer mu.Unlock()
 
-		var chans []chan struct{}
-		for _, cc := range sigs[channel] {
-			if cc == c {
-				continue
-			}
-			chans = append(chans, cc)
-		}
-		sigs[channel] = chans
+		sigs[channel] = slicez.Reject(sigs[channel], func(a chan struct{}) bool {
+			return a == c
+		})
 	}
 }

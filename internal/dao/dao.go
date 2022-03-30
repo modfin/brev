@@ -1,10 +1,14 @@
 package dao
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/modfin/brev"
+	"github.com/modfin/brev/internal/signals"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -12,17 +16,24 @@ import (
 type DAO interface {
 	UpsertApiKey(*ApiKey) error
 	GetApiKey(key string) (*ApiKey, error)
+
+	EnqueueEmail(spoolmails []SpoolEmail, content []byte) ([]int64, error)
+
+	RequeueEmail(spoolmail SpoolEmail) error
+
 	GetQueuedEmails(count int) (emails []SpoolEmail, err error)
 	ClaimEmail(transactionId int64) error
-	UpdateEmailBrevStatus(transactionId int64, statusBrev string) error
-	UpdateSendCount(email SpoolEmail) error
+
+	UpdateEmailStatus(transactionId int64, statusBrev string) error
+	UpdateEmailSendCount(email SpoolEmail) error
 
 	GetEmailContent(messageId string) ([]byte, error)
-	AddEmailToSpool(spoolmails []SpoolEmail, content []byte) ([]int64, error)
-	RescheduleEmailToSpool(spoolmail SpoolEmail) error
 
 	AddSpoolSpecificLogEntry(messageId string, transactionId int64, log string) error
 	AddSpoolLogEntry(messageId string, log string) error
+
+	EnqueuePosthook(email SpoolEmail, event brev.PosthookEvent, message string) error
+	DequeuePosthook(count int) ([]Posthook, error)
 }
 
 func NewSQLite(path string) (DAO, error) {
@@ -36,7 +47,73 @@ type sqlite struct {
 	path string
 }
 
-func (s *sqlite) RescheduleEmailToSpool(email SpoolEmail) error {
+func (s *sqlite) DequeuePosthook(count int) (hooks []Posthook, err error) {
+	q := `
+	DELETE FROM posthook_queue
+	WHERE posthook_id IN (SELECT posthook_id FROM posthook_queue
+						  ORDER BY posthook_id ASC
+						  LIMIT 1)
+	RETURNING *
+;`
+	var tx *sqlx.Tx
+	tx, err = s.getTX()
+	if err != nil {
+		err = fmt.Errorf("failed to get transaction, err %v", err)
+		return nil, err
+	}
+
+	defer func() {
+		if err == nil {
+			err = tx.Commit()
+			return
+		}
+		fmt.Printf("[DAO]: failed to get transactions, rolling back,%v\n", err)
+		_ = tx.Rollback()
+	}()
+
+	err = tx.Select(&hooks, q, count)
+	return hooks, err
+}
+
+func (s *sqlite) EnqueuePosthook(email SpoolEmail, event brev.PosthookEvent, message string) error {
+
+	key, err := s.GetApiKey(email.ApiKey)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(key.PosthookURL, "http") {
+		return nil
+	}
+
+	payload := brev.Posthook{
+		MessageId:     email.MessageId,
+		TransactionId: email.TransactionId,
+		CreatedAt:     time.Now().In(time.UTC),
+		Emails:        email.Recipients,
+		Event:         event,
+		Info:          message,
+	}
+
+	content, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	q := `INSERT INTO posthook_queue (api_key, posthook_url, content) 
+		  VALUES (?, ?, ?)`
+	db, err := s.getDB()
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(q, key.Key, key.PosthookURL, string(content))
+	if err == nil {
+		signals.Broadcast(signals.NewPosthook)
+	}
+	return err
+}
+
+func (s *sqlite) RequeueEmail(email SpoolEmail) error {
 	q := `
 		UPDATE spool
 		SET send_at = ?,
@@ -62,7 +139,7 @@ func (s *sqlite) RescheduleEmailToSpool(email SpoolEmail) error {
 	return err
 }
 
-func (s *sqlite) UpdateSendCount(email SpoolEmail) error {
+func (s *sqlite) UpdateEmailSendCount(email SpoolEmail) error {
 	q := `
 		UPDATE spool
 		SET send_count = ?,
@@ -78,7 +155,7 @@ func (s *sqlite) UpdateSendCount(email SpoolEmail) error {
 
 }
 
-func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (transactionIds []int64, err error) {
+func (s *sqlite) EnqueueEmail(transfers []SpoolEmail, content []byte) (transactionIds []int64, err error) {
 
 	if len(transfers) == 0 {
 		return nil, errors.New("transfer list must be greater than 0")
@@ -142,6 +219,14 @@ func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (transa
 			return
 		}
 
+		// Since we need to know what specific email that bounced, we need to keep trac of transaction id in bounce email.
+		transfer.From = strings.Replace(transfer.From, "=", "="+strconv.FormatInt(transactionId, 10)+"=", 1)
+		_, err = tx.Exec(`UPDATE spool SET from_ = ? WHERE transaction_id = ?`, transfer.From, transactionId)
+		if err != nil {
+			err = fmt.Errorf("failed to update from after initial insert, err %v", err)
+			return
+		}
+
 		transactionIds = append(transactionIds, transactionId)
 		err = s.AddSpoolSpecificLogEntryTx(tx, messageId, transactionId, "transfer list has been added to spool")
 		if err != nil {
@@ -153,7 +238,7 @@ func (s *sqlite) AddEmailToSpool(transfers []SpoolEmail, content []byte) (transa
 	return
 }
 
-func (s *sqlite) UpdateEmailBrevStatus(transactionId int64, statusBrev string) error {
+func (s *sqlite) UpdateEmailStatus(transactionId int64, statusBrev string) error {
 	q := `
 		UPDATE spool
 		SET status = ?,
@@ -328,13 +413,13 @@ func (s *sqlite) GetQueuedEmails(count int) (emails []SpoolEmail, err error) {
 }
 
 func (s *sqlite) UpsertApiKey(key *ApiKey) error {
-	q := `INSERT INTO api_key (api_key, domain, mx_cname) 
-		  VALUES (?, ?, ?)`
+	q := `INSERT INTO api_key (api_key, domain, mx_cname, posthook_url) 
+		  VALUES (?, ?, ?, ?)`
 	db, err := s.getDB()
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(q, key.Key, key.Domain, key.MxCNAME)
+	_, err = db.Exec(q, key.Key, key.Domain, key.MxCNAME, key.PosthookURL)
 	return err
 }
 
@@ -408,9 +493,8 @@ func (s *sqlite) ensureSchema() error {
 	CREATE TABLE IF NOT EXISTS api_key (
 	    api_key TEXT PRIMARY KEY,
 		domain TEXT NOT NULL,
-	    mx_cname TEXT DEFAULT '',
-	    
-	    posthook_url TEXT
+	    mx_cname TEXT DEFAULT '' NOT NULL ,  
+	    posthook_url TEXT DEFAULT '' NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS spool (
@@ -446,6 +530,15 @@ func (s *sqlite) ensureSchema() error {
 	    transaction_id TEXT INTEGER,
 	    log TEXT NOT NULL,
 	    PRIMARY KEY (message_id, created_at)
+	);
+
+
+	CREATE TABLE IF NOT EXISTS posthook_queue (
+	    posthook_id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    api_key TEXT NOT NULL,
+		posthook_url TEXT NOT NULL,
+		content text,
+		created_at DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
 	);
 
 	

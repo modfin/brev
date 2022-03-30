@@ -7,9 +7,11 @@ import (
 	"github.com/modfin/brev/internal/api"
 	"github.com/modfin/brev/internal/config"
 	"github.com/modfin/brev/internal/dao"
+	"github.com/modfin/brev/internal/hooker"
 	"github.com/modfin/brev/internal/msa"
 	"github.com/modfin/brev/internal/mta"
 	"github.com/modfin/brev/smtpx"
+	"github.com/modfin/henry/chanz"
 	"os"
 	"os/signal"
 	"syscall"
@@ -37,6 +39,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	hook := hooker.New(ctx, db)
+	hook.Start(2)
+
 	transferAgent := mta.New(ctx, db, dnsx.LookupEmailMX, smtpx.NewConnection, cfg.Hostname)
 	transferAgent.Start(5)
 
@@ -54,12 +59,14 @@ func main() {
 		fmt.Println("[Brev]: Unexpected closing of api server")
 	case <-transferAgent.Done():
 		fmt.Println("[Brev]: Unexpected closing of mta server")
+	case <-hook.Done():
+		fmt.Println("[Brev]: Unexpected closing of posthook sender")
 	}
 
 	fmt.Println("[Brev]: Initiating server shutdown")
 	cancel()
 	select {
-	case <-apiDone:
+	case <-chanz.EveryDone(apiDone, transferAgent.Done(), hook.Done()):
 	case <-time.After(10 * time.Second):
 	}
 	fmt.Println("[Brev]: Shutdown complete, terminating now")

@@ -430,8 +430,7 @@ func NewConnection(logger Logger, addr string, localName string, a Auth) (Connec
 	return c, nil
 }
 
-func (c *connection) SendMail(from string, to []string, msg io.WriterTo) error {
-	var err error
+func (c *connection) SendMail(from string, to []string, msg io.WriterTo) (err error) {
 	if err = validateLine(from); err != nil {
 		return err
 	}
@@ -441,23 +440,36 @@ func (c *connection) SendMail(from string, to []string, msg io.WriterTo) error {
 		}
 	}
 	if err = c.client.Mail(from); err != nil {
+		_ = c.client.Reset()
 		return err
 	}
+	existing := 0
 	for _, addr := range to {
 		if err = c.client.Rcpt(addr); err != nil {
-			return err
+			// If a recipient does not exist. just keep going with the others
+			continue
 		}
+		existing += 1
 	}
+
+	if existing == 0 {
+		_ = c.client.Reset()
+		return err
+	}
+
 	w, err := c.client.Data()
 	if err != nil {
+		_ = c.client.Reset()
 		return err
 	}
 	_, err = msg.WriteTo(w)
 	if err != nil {
+		_ = c.client.Reset()
 		return err
 	}
 	err = w.Close()
 	if err != nil {
+		_ = c.client.Reset()
 		return err
 	}
 	return nil

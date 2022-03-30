@@ -163,7 +163,7 @@ func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 
 		}
 
-		transactionIds, err := db.AddEmailToSpool(spoolmails, content)
+		transactionIds, err := db.EnqueueEmail(spoolmails, content)
 
 		if err != nil {
 			return fmt.Errorf("failed to add to spool, err %v", err)

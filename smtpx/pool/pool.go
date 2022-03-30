@@ -137,7 +137,12 @@ type connections struct {
 
 func (c *connections) sendMail(logger smtpx.Logger, from string, to []string, msg io.WriterTo) error {
 	con := c.connections[rand.Intn(len(c.connections))] // Avoid locking for roundrobin stuff
-	return con.sendMail(logger, from, to, msg)
+
+	//421 Too many concurrent SMTP connections; please try again later
+	// TODO check for 421 and adjust # connection
+	err := con.sendMail(logger, from, to, msg)
+
+	return err
 }
 
 func newConnection(addr string, dialer smtpx.Dialer, localName string) *connection {

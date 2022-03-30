@@ -159,10 +159,10 @@ func TestMTA_worker(t *testing.T) {
 					t.Errorf("ERROR: got dao.GetEmailContent messageID: %s, want: %s", testDao.gotGetMessageId, tc.wantGetMessageId)
 				}
 				//if testDao.gotUpdateTransactionId != tc.wantUpdateMessageId {
-				//	t.Errorf("ERROR: got dao.UpdateEmailBrevStatus messageID: %s, want: %s", testDao.gotUpdateMessageId, tc.wantUpdateMessageId)
+				//	t.Errorf("ERROR: got dao.UpdateEmailStatus messageID: %s, want: %s", testDao.gotUpdateMessageId, tc.wantUpdateMessageId)
 				//}
 				if testDao.gotUpdateStatus != tc.wantStatus {
-					t.Errorf("ERROR: got dao.UpdateEmailBrevStatus status: %s, want: %s", testDao.gotUpdateStatus, tc.wantStatus)
+					t.Errorf("ERROR: got dao.UpdateEmailStatus status: %s, want: %s", testDao.gotUpdateStatus, tc.wantStatus)
 				}
 
 				// Dialer

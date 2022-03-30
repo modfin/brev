@@ -246,7 +246,7 @@ func sendmail(c *cli.Context) (err error) {
 		}
 
 		mx.Emails = slicez.Uniq(mx.Emails)
-		addr := mx.MXServers[0] + ":25"
+		addr := mx.MXServers[0]
 		fmt.Println("Transferring emails for", mx.Domain, "to mx", "smtp://"+addr)
 		for _, t := range mx.Emails {
 			fmt.Println(" - ", t)

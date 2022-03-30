@@ -24,7 +24,16 @@ type SpoolEmail struct {
 }
 
 type ApiKey struct {
-	Key     string `db:"api_key"`
-	Domain  string `db:"domain"`
-	MxCNAME string `db:"mx_cname"`
+	Key         string `db:"api_key"`
+	Domain      string `db:"domain"`
+	MxCNAME     string `db:"mx_cname"`
+	PosthookURL string `db:"posthook_url"`
+}
+
+type Posthook struct {
+	Id        int64     `db:"posthook_id"`
+	ApiKey    string    `db:"api_key"`
+	TargetUrl string    `db:"posthook_url"`
+	Content   string    `db:"content"`
+	CreatedAt time.Time `db:"created_at"`
 }
