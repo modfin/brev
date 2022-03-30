@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/modfin/henry/slicez"
 	"io"
 	"net"
 	"net/textproto"
@@ -435,6 +434,10 @@ func (c *connection) SendMail(from string, to []string, msg io.WriterTo) (err er
 	if err = validateLine(from); err != nil {
 		return err
 	}
+
+	if len(to) == 0 {
+		return errors.New("there must be at least 1 recipient")
+	}
 	for _, recp := range to {
 		if err = validateLine(recp); err != nil {
 			return err
@@ -447,19 +450,20 @@ func (c *connection) SendMail(from string, to []string, msg io.WriterTo) (err er
 	var errs []error
 	for _, addr := range to {
 		if err = c.client.Rcpt(addr); err != nil {
-			errs = append(errs, err)
-			// If a recipient does not exist. just keep going with the others
-			continue
+			// 550: 5.1.1 The email account that you tried to reach does not exist
+			if terr, ok := err.(*textproto.Error); ok && terr.Code == 550 {
+				errs = append(errs, err)
+				continue
+			}
+			_ = c.client.Reset()
+			return err
+
 		}
 	}
-
 	// No recipient on the other end...
 	if len(to) == len(errs) {
 		_ = c.client.Reset()
-		msgs := slicez.Map(errs, func(e error) string {
-			return err.Error()
-		})
-		return errors.New(strings.Join(msgs, ";"))
+		return errs[0]
 	}
 
 	w, err := c.client.Data()
