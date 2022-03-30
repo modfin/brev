@@ -38,7 +38,7 @@ func (c *Client) Send(ctx context.Context, email *Email) (Receipt, error) {
 	if err != nil {
 		return Receipt{}, err
 	}
-	req.WithContext(ctx)
+	req = req.WithContext(ctx)
 	req.Header.Add("content-type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

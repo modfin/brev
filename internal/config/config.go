@@ -12,8 +12,6 @@ type Config struct {
 
 	Hostname string `env:"BREV_HOSTNAME"` // hostname of this particular mx node, eg mx0.brev.cc
 
-	HttpPort int `env:"BREV_HTTP_PORT"`
-
 	DbURI string `env:"BREV_DB_URI" envDefault:"./brev.sqlite"`
 
 	Workers int `env:"BREV_WORKERS" envDefault:"5"`
