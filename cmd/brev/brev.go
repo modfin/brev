@@ -16,6 +16,7 @@ import (
 	"github.com/urfave/cli/v2"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -185,12 +186,18 @@ func sendmail(c *cli.Context) (err error) {
 	message.SetHeader("From", from)
 
 	var emails []string
+
+	var portReg = regexp.MustCompile("(:)[0-9]+$")
+	portReplacer := func(s string) string {
+		return portReg.ReplaceAllString(s, "")
+	}
+
 	if len(to) > 0 {
-		message.SetHeader("To", to...)
+		message.SetHeader("To", slicez.Map(to, portReplacer)...)
 		emails = append(emails, to...)
 	}
 	if len(cc) > 0 {
-		message.SetHeader("Cc", cc...)
+		message.SetHeader("Cc", slicez.Map(cc, portReplacer)...)
 		emails = append(emails, cc...)
 	}
 	if len(bcc) > 0 {
@@ -252,7 +259,7 @@ func sendmail(c *cli.Context) (err error) {
 			fmt.Println(" - ", t)
 		}
 
-		err = smtpx.SendMail(nil, addr, "localhost", nil, from, mx.Emails, message)
+		err = smtpx.SendMail(nil, addr, "localhost", nil, from, slicez.Map(mx.Emails, portReplacer), message)
 		if err != nil {
 			return
 		}

@@ -4,6 +4,7 @@ import (
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/slicez"
 	"net"
+	"regexp"
 	"strings"
 )
 
@@ -13,6 +14,9 @@ type TransferList struct {
 	MXServers []string
 	Err       error
 }
+
+var isIPAddress = regexp.MustCompile("^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")
+var hasPort = regexp.MustCompile("(:)[0-9]+$")
 
 type MXLookup func(emails []string) []TransferList
 
@@ -30,11 +34,25 @@ func LookupEmailMX(emails []string) []TransferList {
 	delete(buckets, "")
 
 	for domain, addresses := range buckets {
-		recs, err := net.LookupMX(domain)
+
+		var err error
+		var recs []*net.MX
+		if isIPAddress.MatchString(domain) {
+			recs = append(recs, &net.MX{
+				Host: domain,
+			})
+		}
+		if len(recs) == 0 {
+			recs, _ = net.LookupMX(domain)
+		}
+
 		slicez.SortFunc(recs, func(i, j *net.MX) bool {
 			return i.Pref < j.Pref
 		})
 		var servers = slicez.Map(recs, func(rec *net.MX) string {
+			if hasPort.MatchString(rec.Host) {
+				return rec.Host
+			}
 			return rec.Host + ":25"
 		})
 
