@@ -10,6 +10,8 @@ import (
 	"github.com/modfin/brev/internal/config"
 	"github.com/modfin/brev/internal/dao"
 	"github.com/modfin/brev/smtpx/dkim"
+	"golang.org/x/crypto/acme/autocert"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,7 +27,7 @@ func Init(ctx context.Context, db dao.DAO, cfg *config.Config) (done chan interf
 		})
 	}
 
-	signer, err := dkim.NewSigner(cfg.DKIMPrivetKey)
+	signer, err := dkim.NewSigner(cfg.DKIMPrivateKey)
 	if err != nil {
 		fmt.Println("[API]: Failed to load dkim private key, emails wont be signed using dkim, err;", err)
 	}
@@ -52,7 +54,19 @@ func Init(ctx context.Context, db dao.DAO, cfg *config.Config) (done chan interf
 	}()
 
 	go func() {
-		err := e.Start(fmt.Sprintf(":%d", cfg.APIPort))
+		var err error
+		if cfg.APIAutoTLS {
+			email := strings.TrimSpace(cfg.APIAutoTLSEmail)
+			if email == "" {
+				fmt.Println("[API]: warning BREV_API_AUTO_TLS is enabled, but BREV_API_AUTO_TLS_EMAIL not set")
+			}
+			e.AutoTLSManager.Cache = autocert.DirCache("/var/lib/brev")
+			e.AutoTLSManager.HostPolicy = autocert.HostWhitelist(cfg.Hostname)
+			e.AutoTLSManager.Email = email
+			err = e.StartAutoTLS(fmt.Sprintf(":%d", cfg.APIPort))
+		} else {
+			err = e.Start(fmt.Sprintf(":%d", cfg.APIPort))
+		}
 		if err != nil {
 			fmt.Println("[API]: stopped err,", err)
 		}

@@ -16,9 +16,12 @@ type Config struct {
 
 	Workers int `env:"BREV_WORKERS" envDefault:"5"`
 
-	DKIMSelector  string `env:"BREV_DKIM_SELECTOR" envDefault:"brev"` // eg brevcc._domainkey.example.com should contain dkim pub record
-	DKIMPrivetKey string `env:"BREV_DKIM_PRIVATE_KEY,file" envDefault:"dkim-private.pem"`
-	APIPort       int    `env:"BREV_API_PORT" envDefault:"8080"`
+	DKIMSelector   string `env:"BREV_DKIM_SELECTOR" envDefault:"brev"` // eg brevcc._domainkey.example.com should contain dkim pub record
+	DKIMPrivateKey string `env:"BREV_DKIM_PRIVATE_KEY,file" envDefault:"dkim-private.pem"`
+
+	APIPort         int    `env:"BREV_API_PORT" envDefault:"8080"`
+	APIAutoTLS      bool   `env:"BREV_API_AUTO_TLS" envDefault:"false"` // use echo AutoTLSManager for getting a certificate for BREV_HOSTNAME
+	APIAutoTLSEmail string `env:"BREV_API_AUTO_TLS_EMAIL"`              // account email for Let's Encrypt
 }
 
 var (

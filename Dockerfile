@@ -10,4 +10,5 @@ EXPOSE 8080
 RUN apk add --no-cache tzdata ca-certificates
 COPY --from=builder /brev /brev
 COPY --from=builder /brevd /brevd
+VOLUME /var/lib/brev
 ENTRYPOINT /brevd

@@ -43,7 +43,7 @@ func LookupEmailMX(emails []string) []TransferList {
 			})
 		}
 		if len(recs) == 0 {
-			recs, _ = net.LookupMX(domain)
+			recs, _ = net.LookupMX(domain) // TODO: error?
 		}
 
 		slicez.SortFunc(recs, func(i, j *net.MX) bool {
