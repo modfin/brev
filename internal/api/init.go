@@ -11,6 +11,7 @@ import (
 	"github.com/modfin/brev/internal/dao"
 	"github.com/modfin/brev/smtpx/dkim"
 	"golang.org/x/crypto/acme/autocert"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +38,11 @@ func Init(ctx context.Context, db dao.DAO, cfg *config.Config) (done chan interf
 	prom := prometheus.NewPrometheus("echo", nil)
 	e.Use(middleware.Logger(), prom.HandlerFunc)
 
-	e.POST("/mta", EnqueueMTA(db, cfg.DKIMSelector, signer, cfg.Hostname, cfg.MXDomain, dnsx.LookupEmailMX))
+	e.GET("", func(c echo.Context) error {
+		return c.String(http.StatusOK, "OK")
+	})
+	e.POST("/mta", enqueueMTA(db, cfg.DKIMSelector, signer, cfg.Hostname, cfg.MXDomain, dnsx.LookupEmailMX))
+	e.PUT("/key-settings", updateKeySettings(db))
 	//e.GET("/mta")            // returns list of sent emails
 	//e.GET("/mta/:messageId") // returns log of specific email
 

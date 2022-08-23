@@ -15,8 +15,9 @@ import (
 )
 
 type DAO interface {
-	UpsertApiKey(*ApiKey) error
-	GetApiKey(key string) (*ApiKey, error)
+	EnsureApiKey(string) error
+	UpsertApiKey(ApiKey) (ApiKey, error)
+	GetApiKey(key string) (ApiKey, error)
 
 	EnqueueEmails(emails []SpoolEmail, content []byte) ([]int64, error)
 	DequeueEmails(count int) (emails []SpoolEmail, err error)
@@ -369,29 +370,46 @@ func (s *sqlite) GetEmailContent(messageId string) ([]byte, error) {
 	err = db.Get(&content, q, messageId)
 	return []byte(content), err
 }
-
-func (s *sqlite) UpsertApiKey(key *ApiKey) error {
-	q := `INSERT INTO api_key (api_key, domain, mx_cname, posthook_url) 
-		  VALUES (?, ?, ?, ?)`
+func (s *sqlite) EnsureApiKey(apiKey string) error {
+	q := `INSERT INTO api_key (api_key, domain)
+	      VALUES (?, '')
+	      ON CONFLICT (api_key) DO NOTHING
+	`
 	db, err := s.getDB()
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(q, key.Key, key.Domain, key.MxCNAME, key.PosthookURL)
+	_, err = db.Exec(q, apiKey)
 	return err
 }
 
-func (s *sqlite) GetApiKey(key string) (*ApiKey, error) {
+func (s *sqlite) UpsertApiKey(key ApiKey) (ApiKey, error) {
+	q := `INSERT INTO api_key (api_key, domain, mx_cname, posthook_url) 
+	      VALUES (?, ?, ?, ?)
+	      ON CONFLICT (api_key)
+	      DO UPDATE SET (domain, mx_cname, posthook_url) = (EXCLUDED.domain, EXCLUDED.mx_cname, EXCLUDED.posthook_url)
+	      RETURNING *
+	`
+	db, err := s.getDB()
+	if err != nil {
+		return ApiKey{}, err
+	}
+	var out ApiKey
+	err = db.Get(&out, q, key.Key, key.Domain, key.MxCNAME, key.PosthookURL)
+	return out, err
+}
+
+func (s *sqlite) GetApiKey(key string) (ApiKey, error) {
 	// TODO add cache for keys...
 
 	q := `SELECT * FROM api_key WHERE api_key = ?`
 	db, err := s.getDB()
 	if err != nil {
-		return nil, err
+		return ApiKey{}, err
 	}
 	var apiKey ApiKey
 	err = db.Get(&apiKey, q, key)
-	return &apiKey, err
+	return apiKey, err
 }
 
 func (s *sqlite) tuneDatabase() error {

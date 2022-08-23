@@ -18,16 +18,16 @@ import (
 	"time"
 )
 
-func getApiKey(c echo.Context, db dao.DAO) (*dao.ApiKey, error) {
+func getApiKey(c echo.Context, db dao.DAO) (dao.ApiKey, error) {
 	key := c.QueryParam("key")
 	if key == "" {
-		return nil, errors.New("an api key must be provided")
+		return dao.ApiKey{}, errors.New("an api key must be provided")
 	}
 
 	return db.GetApiKey(key)
 }
 
-func validateFrom(key *dao.ApiKey, email *brev.Email) error {
+func validateFrom(key dao.ApiKey, email *brev.Email) error {
 	// if bad formatting
 	from := email.From
 	_, err := mail.ParseAddress(from.String())
@@ -73,10 +73,8 @@ func newMessageId(hostname string) string {
 	return fmt.Sprintf("%s=%s", uuid.New().String(), hostname)
 }
 
-func EnqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname string, defaultMXDomain string, emailMxLookup dnsx.MXLookup) echo.HandlerFunc {
-
+func enqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname string, defaultMXDomain string, emailMxLookup dnsx.MXLookup) echo.HandlerFunc {
 	return func(c echo.Context) error {
-
 		key, err := getApiKey(c, db)
 		if err != nil {
 			return fmt.Errorf("failed to retrive key, err %v", err)

@@ -22,6 +22,8 @@ type Config struct {
 	APIPort         int    `env:"BREV_API_PORT" envDefault:"8080"`
 	APIAutoTLS      bool   `env:"BREV_API_AUTO_TLS" envDefault:"false"` // use echo AutoTLSManager for getting a certificate for BREV_HOSTNAME
 	APIAutoTLSEmail string `env:"BREV_API_AUTO_TLS_EMAIL"`              // account email for Let's Encrypt
+
+	APIKeys []string `env:"BREV_API_KEYS" envSeparator:","`
 }
 
 var (

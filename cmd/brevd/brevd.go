@@ -31,6 +31,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	for _, key := range cfg.APIKeys {
+		err := db.EnsureApiKey(key)
+		if err != nil {
+			fmt.Println("could not ensure api-key, err:", err)
+			os.Exit(1)
+		}
+	}
+
 	apiDone := api.Init(ctx, db, cfg)
 	_, err = msa.New(ctx, db, config.Get())
 	if err != nil {
