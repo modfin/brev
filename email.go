@@ -16,9 +16,9 @@ func NewEmail() *Email {
 type Headers map[string][]string
 
 func (h Headers) keyOf(key string) string {
-	key = strings.ToLower(key)
+	cmpKey := strings.ToLower(key)
 	for candidate := range h {
-		if strings.ToLower(candidate) == key {
+		if strings.ToLower(candidate) == cmpKey {
 			return candidate
 		}
 	}
