@@ -58,13 +58,14 @@ func From(email *brev.Email) (*Envelope, error) {
 	}
 	message.SetHeader("Subject", email.Subject)
 
-	if email.HTML != "" {
+	if email.HTML != "" && email.Text != "" {
+		// order is important, and apparently the text/plain part should go first in the multipart/alternative
+		// at least gmail picks the last alternative to display...
+		message.SetBody("text/plain", email.Text)
+		message.AddAlternative("text/html", email.HTML)
+	} else if email.HTML != "" {
 		message.SetBody("text/html", email.HTML)
-		if email.Text != "" {
-			message.AddAlternative("text/plain", email.Text)
-		}
-	}
-	if email.HTML == "" && email.Text != "" {
+	} else if email.Text != "" {
 		message.SetBody("text/plain", email.Text)
 	}
 
