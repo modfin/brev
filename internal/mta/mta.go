@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modfin/brev"
-	"github.com/modfin/brev/dnsx"
 	"github.com/modfin/brev/internal/dao"
 	"github.com/modfin/brev/internal/signals"
 	"github.com/modfin/brev/smtpx"
@@ -20,14 +19,13 @@ import (
 
 // Mail Transfer Agent, sending mails to where ever they should go
 
-func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer smtpx.Dialer, localName string) *MTA {
+func New(ctx context.Context, db dao.DAO, dialer smtpx.Dialer, localName string) *MTA {
 	done := make(chan interface{})
 	m := &MTA{
-		done:          done,
-		ctx:           ctx,
-		db:            db,
-		emailMxLookup: emailMxLookup,
-		pool:          pool.New(ctx, dialer, 5, localName),
+		done: done,
+		ctx:  ctx,
+		db:   db,
+		pool: pool.New(ctx, dialer, 5, localName),
 		closer: func() func() {
 			once := sync.Once{}
 			return func() {
@@ -41,12 +39,11 @@ func New(ctx context.Context, db dao.DAO, emailMxLookup dnsx.MXLookup, dialer sm
 }
 
 type MTA struct {
-	done          chan interface{}
-	ctx           context.Context
-	db            dao.DAO
-	emailMxLookup dnsx.MXLookup
-	pool          *pool.Pool
-	closer        func()
+	done   chan interface{}
+	ctx    context.Context
+	db     dao.DAO
+	pool   *pool.Pool
+	closer func()
 }
 
 func (m *MTA) Done() <-chan interface{} {
@@ -183,11 +180,6 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 		}
 		// TODO iterate over mx servers i failing to connect...
 		addr := spoolmail.MXServers[0]
-
-		if err != nil {
-			logger.Logf("got error updating send count, err %v", err)
-			continue
-		}
 
 		start := time.Now()
 		err = m.pool.SendMail(logger, addr, spoolmail.From, spoolmail.Recipients, bytes.NewBuffer(content))

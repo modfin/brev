@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/modfin/brev/dnsx"
 	"github.com/modfin/brev/internal/api"
 	"github.com/modfin/brev/internal/config"
 	"github.com/modfin/brev/internal/dao"
@@ -50,7 +49,7 @@ func main() {
 	hook := hooker.New(ctx, db)
 	hook.Start(2)
 
-	transferAgent := mta.New(ctx, db, dnsx.LookupEmailMX, smtpx.NewConnection, cfg.Hostname)
+	transferAgent := mta.New(ctx, db, smtpx.NewConnection, cfg.Hostname)
 	transferAgent.Start(5)
 
 	sigc := make(chan os.Signal, 1)
