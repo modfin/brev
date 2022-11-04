@@ -13,8 +13,8 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.15
 	github.com/modfin/henry v0.0.0-20220425073158-37972c80b10d
 	github.com/stretchr/testify v1.8.0
-	github.com/urfave/cli/v2 v2.20.2
-	golang.org/x/crypto v0.0.0-20220722155217-630584e8d5aa
+	github.com/urfave/cli/v2 v2.23.2
+	golang.org/x/crypto v0.1.0
 )
 
 require (
@@ -40,9 +40,9 @@ require (
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.1 // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
-	golang.org/x/net v0.0.0-20220728030405-41545e8bf201 // indirect
-	golang.org/x/sys v0.0.0-20220728004956-3c1f35247d10 // indirect
-	golang.org/x/text v0.3.8 // indirect
+	golang.org/x/net v0.1.0 // indirect
+	golang.org/x/sys v0.1.0 // indirect
+	golang.org/x/text v0.4.0 // indirect
 	golang.org/x/time v0.0.0-20220722155302-e5dcc9cfc0b9 // indirect
 	google.golang.org/protobuf v1.28.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
