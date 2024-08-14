@@ -39,24 +39,29 @@ type Client struct {
 
 // Dial returns a new Client connected to an SMTP server at addr.
 // The addr must include a port, as in "mail.example.com:smtp".
-func Dial(addr string, localName string) (*Client, error) {
+func Dial(logger Logger, addr string, localName string) (*Client, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	host, _, _ := net.SplitHostPort(addr)
-	return NewClient(conn, host, localName)
+	return NewClient(logger, conn, host, localName)
 }
 
 // NewClient returns a new Client using an existing connection and host as a
 // server name to be used when authenticating.
-func NewClient(conn net.Conn, host string, localName string) (*Client, error) {
+func NewClient(logger Logger, conn net.Conn, host string, localName string) (*Client, error) {
 	text := textproto.NewConn(conn)
-	_, _, err := text.ReadResponse(220)
+	code, msg, err := text.ReadResponse(220)
 	if err != nil {
 		text.Close()
 		return nil, err
 	}
+
+	if logger != nil {
+		logger.Logf("[smtp] <- %d: %s", code, msg)
+	}
+
 	if localName == "" {
 		localName = "localhost"
 	}
@@ -106,7 +111,7 @@ func (c *Client) Hello(localName string) error {
 // cmd is a convenience function that sends a command and returns the response
 func (c *Client) cmd(expectCode int, format string, args ...interface{}) (int, string, error) {
 	if c.logger != nil {
-		c.logger.Logf("smtp > "+format, args...)
+		c.logger.Logf("[smtp] -> "+format, args...)
 	}
 
 	id, err := c.Text.Cmd(format, args...)
@@ -117,7 +122,7 @@ func (c *Client) cmd(expectCode int, format string, args ...interface{}) (int, s
 	defer c.Text.EndResponse(id)
 	code, msg, err := c.Text.ReadResponse(expectCode)
 	if c.logger != nil {
-		c.logger.Logf("smtp < %d: %s", code, msg)
+		c.logger.Logf("[smtp] <- %d: %s", code, msg)
 	}
 	return code, msg, err
 }
@@ -286,7 +291,7 @@ func (d *dataCloser) Close() error {
 	d.WriteCloser.Close()
 	code, msg, err := d.c.Text.ReadResponse(250)
 	if d.c.logger != nil {
-		d.c.logger.Logf("smtp < %d: %s", code, msg)
+		d.c.logger.Logf("[smtp] <- %d: %s", code, msg)
 	}
 	return err
 }
@@ -334,7 +339,7 @@ func SendMail(logger Logger, addr string, localName string, a Auth, from string,
 			return err
 		}
 	}
-	c, err := Dial(addr, localName)
+	c, err := Dial(logger, addr, localName)
 	if err != nil {
 		return err
 	}
@@ -372,11 +377,14 @@ func SendMail(logger Logger, addr string, localName string, a Auth, from string,
 	if err != nil {
 		return err
 	}
-	_, err = msg.WriteTo(w)
+	i, err := msg.WriteTo(w)
 	if err != nil {
 		return err
 	}
 	err = w.Close()
+	if logger != nil {
+		logger.Logf("[smtp] -> {... %d bytes written}", i)
+	}
 	if err != nil {
 		return err
 	}
@@ -402,7 +410,7 @@ type Dialer func(logger Logger, addr string, localName string, a Auth) (Connecti
 func NewConnection(logger Logger, addr string, localName string, a Auth) (Connection, error) {
 	c := &connection{}
 	var err error
-	c.client, err = Dial(addr, localName)
+	c.client, err = Dial(logger, addr, localName)
 	if err != nil {
 		return nil, err
 	}
@@ -471,10 +479,13 @@ func (c *connection) SendMail(from string, to []string, msg io.WriterTo) (err er
 		_ = c.client.Reset()
 		return err
 	}
-	_, err = msg.WriteTo(w)
+	i, err := msg.WriteTo(w)
 	if err != nil {
 		_ = c.client.Reset()
 		return err
+	}
+	if c.client.logger != nil {
+		c.client.logger.Logf("[smtp] -> {written %d bytes}", i)
 	}
 	err = w.Close()
 	if err != nil {

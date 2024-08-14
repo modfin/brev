@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"mime"
+	"regexp"
 	"strings"
 )
 
@@ -82,6 +83,30 @@ func (e *Email) AddAttachments(filename string, contentType string, data []byte)
 type Address struct {
 	Name  string `json:"name"`
 	Email string `json:"email"`
+}
+
+var addreg = regexp.MustCompile("(.*)<(\\S*@\\S*)>")
+
+// NewAddress takes format 'name@example.com' or 'First Lastname <name@example.com>
+func NewAddress(email string) Address {
+	email = strings.TrimSpace(email)
+	if !addreg.MatchString(email) {
+		return Address{
+			Email: email,
+		}
+	}
+
+	matches := addreg.FindStringSubmatch(email)
+	if len(matches) < 3 {
+		return Address{
+			Email: email,
+		}
+	}
+
+	return Address{
+		Name:  strings.TrimSpace(matches[1]),
+		Email: matches[2],
+	}
 }
 
 func (a Address) String() string {

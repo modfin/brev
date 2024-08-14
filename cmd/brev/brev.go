@@ -8,12 +8,14 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/modfin/brev"
 	"github.com/modfin/brev/dnsx"
 	"github.com/modfin/brev/smtpx"
 	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/slicez"
 	"github.com/urfave/cli/v2"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -43,7 +45,7 @@ func main() {
 			},
 			&cli.StringFlag{
 				Name:  "from",
-				Usage: "Set from email",
+				Usage: "Set from email, 'email' or 'name <email>' is valid",
 			},
 			&cli.StringFlag{
 				Name:  "message-id",
@@ -51,11 +53,11 @@ func main() {
 			},
 			&cli.StringSliceFlag{
 				Name:  "to",
-				Usage: "Set to email",
+				Usage: "Set 'to' email, 'email' or 'name <email>' is valid",
 			},
 			&cli.StringSliceFlag{
 				Name:  "cc",
-				Usage: "Set cc email",
+				Usage: "Set cc email, 'email' or 'name <email>' is valid",
 			},
 			&cli.StringSliceFlag{
 				Name:  "header",
@@ -63,7 +65,7 @@ func main() {
 			},
 			&cli.StringSliceFlag{
 				Name:  "bcc",
-				Usage: "Set cc email",
+				Usage: "Set cc email, 'email' or 'name <email>' is valid",
 			},
 			&cli.StringFlag{
 				Name:  "text",
@@ -88,6 +90,9 @@ func main() {
 			&cli.StringFlag{
 				Name:  "msa-pass",
 				Usage: "password for the msa server",
+			},
+			&cli.BoolFlag{
+				Name: "verbose",
 			},
 		},
 		Action: sendmail,
@@ -147,15 +152,29 @@ func gendkim(c *cli.Context) (err error) {
 	return nil
 }
 
+type printer struct{}
+
+func (p printer) Logf(format string, args ...interface{}) {
+
+	log.Default().Printf(format, slicez.Map(args, func(a any) any {
+		switch a := a.(type) {
+		case string:
+			return strings.ReplaceAll(a, "\n", "; ")
+		}
+		return a
+	})...)
+}
+
 func sendmail(c *cli.Context) (err error) {
 
 	subject := c.String("subject")
-	from := c.String("from")
+	from := brev.NewAddress(c.String("from"))
 	messageId := c.String("message-id")
 
-	to := c.StringSlice("to")
-	cc := c.StringSlice("cc")
-	bcc := c.StringSlice("bcc")
+	to := slicez.Map(c.StringSlice("to"), brev.NewAddress)
+	cc := slicez.Map(c.StringSlice("cc"), brev.NewAddress)
+	bcc := slicez.Map(c.StringSlice("bcc"), brev.NewAddress)
+
 	headers := c.StringSlice("header")
 
 	text := c.String("text")
@@ -167,8 +186,8 @@ func sendmail(c *cli.Context) (err error) {
 
 	message := envelope.NewEnvelope()
 
-	if len(from) == 0 {
-		from, err = tools.SystemUri()
+	if len(from.Email) == 0 {
+		from.Email, err = tools.SystemUri()
 		if err != nil {
 			return err
 		}
@@ -183,21 +202,25 @@ func sendmail(c *cli.Context) (err error) {
 
 	message.SetHeader("Message-ID", fmt.Sprintf("<%s>", messageId))
 	message.SetHeader("Subject", subject)
-	message.SetHeader("From", from)
+	message.SetHeader("From", from.String())
 
-	var emails []string
+	var emails []brev.Address
 
 	var portReg = regexp.MustCompile("(:)[0-9]+$")
-	portReplacer := func(s string) string {
-		return portReg.ReplaceAllString(s, "")
+	tostr := func(s brev.Address) string {
+
+		return brev.Address{
+			Name:  s.Name,
+			Email: portReg.ReplaceAllString(s.Email, ""),
+		}.String()
 	}
 
 	if len(to) > 0 {
-		message.SetHeader("To", slicez.Map(to, portReplacer)...)
+		message.SetHeader("To", slicez.Map(to, tostr)...)
 		emails = append(emails, to...)
 	}
 	if len(cc) > 0 {
-		message.SetHeader("Cc", slicez.Map(cc, portReplacer)...)
+		message.SetHeader("Cc", slicez.Map(cc, tostr)...)
 		emails = append(emails, cc...)
 	}
 	if len(bcc) > 0 {
@@ -216,20 +239,26 @@ func sendmail(c *cli.Context) (err error) {
 		return errors.New("there has to be at least 1 email to send to, cc or bcc")
 	}
 
-	if len(text) > 0 {
+	// Uggly control flow code
+	if len(text) > 0 && len(html) > 0 {
+		// order is important, and apparently the text/plain part should go first in the multipart/alternative
+		// at least gmail picks the last alternative to display...
 		message.SetBody("text/plain", text)
-	}
-	if len(html) > 0 {
+		message.AddAlternative("text/html", html)
+	} else if len(html) > 0 {
 		message.SetBody("text/html", html)
-		if len(text) > 0 {
-			message.AddAlternative("text/plain", text)
-		}
+	} else if len(text) > 0 {
+		message.SetBody("text/plain", text)
 	}
 
 	for _, a := range attachments {
 		message.Attach(a)
 	}
 
+	tomail := func(s brev.Address) string {
+		return s.Email
+	}
+	emailstrs := slicez.Map(emails, tomail)
 	if msaServer != "" {
 		var auth smtpx.Auth
 
@@ -237,10 +266,10 @@ func sendmail(c *cli.Context) (err error) {
 			auth = smtpx.PlainAuth("", msaUser, msaPass, strings.Split(msaServer, ":")[0])
 		}
 
-		return smtpx.SendMail(nil, msaServer, "localhost", auth, from, emails, message)
+		return smtpx.SendMail(nil, msaServer, "localhost", auth, from.Email, emailstrs, message)
 	}
 
-	transferlist := dnsx.LookupEmailMX(emails)
+	transferlist := dnsx.LookupEmailMX(emailstrs)
 
 	if len(transferlist) == 0 {
 		return errors.New("could not find any mx server to send mails to")
@@ -259,7 +288,17 @@ func sendmail(c *cli.Context) (err error) {
 			fmt.Println(" - ", t)
 		}
 
-		err = smtpx.SendMail(nil, addr, "localhost", nil, from, slicez.Map(mx.Emails, portReplacer), message)
+		from := portReg.ReplaceAllString(from.Email, "")
+		mails := slicez.Map(mx.Emails, func(addr string) string {
+			return portReg.ReplaceAllString(addr, "")
+		})
+
+		var logger smtpx.Logger
+		if c.Bool("verbose") {
+			logger = &printer{}
+		}
+
+		err = smtpx.SendMail(logger, addr, "localhost", nil, from, mails, message)
 		if err != nil {
 			return
 		}
