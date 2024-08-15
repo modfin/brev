@@ -7,7 +7,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/modfin/brev"
-	"github.com/modfin/brev/internal/signals"
+	"github.com/modfin/brev/internal/old/signals"
 	"math/rand"
 	"strconv"
 	"strings"

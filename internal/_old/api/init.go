@@ -7,8 +7,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/modfin/brev/dnsx"
-	"github.com/modfin/brev/internal/config"
-	"github.com/modfin/brev/internal/dao"
+	"github.com/modfin/brev/internal/old/config"
+	"github.com/modfin/brev/internal/old/dao"
 	"github.com/modfin/brev/smtpx/dkim"
 	"golang.org/x/crypto/acme/autocert"
 	"net/http"
@@ -68,6 +68,7 @@ func Init(ctx context.Context, db dao.DAO, cfg *config.Config) (done chan interf
 			e.AutoTLSManager.Cache = autocert.DirCache("/var/lib/brev")
 			e.AutoTLSManager.HostPolicy = autocert.HostWhitelist(cfg.Hostname)
 			e.AutoTLSManager.Email = email
+			e.AutoTLSManager.Listener()
 			err = e.StartAutoTLS(fmt.Sprintf(":%d", cfg.APIPort))
 		} else {
 			err = e.Start(fmt.Sprintf(":%d", cfg.APIPort))

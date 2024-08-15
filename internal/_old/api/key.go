@@ -3,7 +3,7 @@ package api
 import (
 	"fmt"
 	"github.com/labstack/echo/v4"
-	"github.com/modfin/brev/internal/dao"
+	"github.com/modfin/brev/internal/old/dao"
 	"net/http"
 	"net/url"
 )

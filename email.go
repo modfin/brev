@@ -1,10 +1,11 @@
 package brev
 
 import (
-	"bytes"
 	"encoding/base64"
-	"mime"
-	"regexp"
+	"fmt"
+	"github.com/modfin/henry/compare"
+	"github.com/modfin/henry/slicez"
+	"net/mail"
 	"strings"
 )
 
@@ -27,49 +28,103 @@ func (h Headers) keyOf(key string) string {
 }
 func (h Headers) Has(key string) bool {
 	key = h.keyOf(key)
-	return len(h[key]) > 0
+	value := h[key]
+	return len(slicez.Reject(value, compare.IsZero[string]())) > 0
 }
 
 func (h Headers) Set(key string, value []string) {
 	key = h.keyOf(key)
-	h[key] = value
+	h[key] = slicez.Reject(value, compare.IsZero[string]())
 }
 func (h Headers) Add(key string, value string) {
 	key = h.keyOf(key)
-	h[key] = append(h[key], value)
+	h[key] = slicez.Reject(append(h[key], value), compare.IsZero[string]())
 }
 func (h Headers) Get(key string) []string {
 	key = h.keyOf(key)
-	return h[key]
+	value := h[key]
+	return slicez.Reject(value, compare.IsZero[string]())
 }
 func (h Headers) GetFirst(key string) string {
 	key = h.keyOf(key)
-	values := h[key]
-	if len(values) == 0 {
+	value := h[key]
+	value = slicez.Reject(value, compare.IsZero[string]())
+	if len(value) == 0 {
 		return ""
 	}
-	return values[0]
+	return value[0]
+}
+
+func (h Headers) Delete(key string) []string {
+	key = h.keyOf(key)
+	value := slicez.Reject(h[key], compare.IsZero[string]())
+	delete(h, key)
+	return value
+
+}
+
+type Metadata struct {
+	Conversation bool   `json:"conversation"`
+	ReturnPath   string `json:"return_path"`
+	Id           string `json:"id"`
 }
 
 type Email struct {
-	Headers Headers   `json:"headers"`
-	From    Address   `json:"from"`
-	To      []Address `json:"to"`
-	Cc      []Address `json:"cc"`
-	Bcc     []Address `json:"bcc"`
-	Subject string    `json:"subject"`
-	HTML    string    `json:"html"`
-	Text    string    `json:"text"`
+	Metadata Metadata
+
+	Headers Headers    `json:"headers"`
+	From    *Address   `json:"from"`
+	To      []*Address `json:"to"`
+	Cc      []*Address `json:"cc"`
+	Bcc     []*Address `json:"bcc"`
+	Subject string     `json:"subject"`
+	HTML    string     `json:"html"`
+	Text    string     `json:"text"`
 
 	Attachments []Attachment `json:"attachments"`
 }
 
-func (e *Email) Recipients() []string {
-	var recipients []string
-	for _, a := range append([]Address(nil), append(append(e.To, e.Cc...), e.Bcc...)...) {
-		recipients = append(recipients, a.Email)
+func (e *Email) Reply() *Email {
+
+	headers := Headers{}
+
+	to := []*Address{e.From}
+
+	if e.Headers.Has("Reply-To") {
+		to = slicez.Reject(
+			slicez.Map(e.Headers.Get("Reply-To"), func(a string) *Address {
+				aa, _ := ParseAddress(a)
+				return aa
+			}), compare.IsZero[*Address]())
 	}
-	return recipients
+	messageId := e.Headers.GetFirst("Message-ID")
+	headers.Set("In-Reply-To", []string{messageId})
+	headers.Set("References", e.Headers.Get("References"))
+	headers.Add("References", e.Headers.GetFirst("Message-ID"))
+
+	return &Email{
+		Metadata: Metadata{
+			Conversation: true,
+		},
+		Headers: headers,
+		To:      to,
+		Subject: compare.Ternary(strings.HasPrefix(e.Subject, "Re: "), e.Subject, fmt.Sprintf("Re: %s", e.Subject)),
+	}
+}
+
+func (e *Email) ReplyAll() *Email {
+	ee := e.Reply()
+	ee.Cc = append(e.To, e.Cc...) // TODO if reply-to header exist, from is ignored.
+	if e.Headers.Has("Reply-To") {
+		ee.Cc = append(ee.Cc, e.From)
+	}
+	return ee
+}
+
+func (e *Email) Recipients() []string {
+	return slicez.Map(slicez.Concat(e.To, e.Cc, e.Bcc), func(a *Address) string {
+		return a.Email
+	})
 }
 
 func (e *Email) AddAttachments(filename string, contentType string, data []byte) {
@@ -85,65 +140,24 @@ type Address struct {
 	Email string `json:"email"`
 }
 
-var addreg = regexp.MustCompile("(.*)<(\\S*@\\S*)>")
-
-// NewAddress takes format 'name@example.com' or 'First Lastname <name@example.com>
-func NewAddress(email string) Address {
-	email = strings.TrimSpace(email)
-	if !addreg.MatchString(email) {
-		return Address{
-			Email: email,
-		}
-	}
-
-	matches := addreg.FindStringSubmatch(email)
-	if len(matches) < 3 {
-		return Address{
-			Email: email,
-		}
-	}
-
-	return Address{
-		Name:  strings.TrimSpace(matches[1]),
-		Email: matches[2],
-	}
+func (a *Address) Valid() error {
+	_, err := ParseAddress(a.String())
+	return err
+}
+func (a *Address) String() string {
+	return (&mail.Address{
+		Name:    a.Name,
+		Address: a.Email,
+	}).String()
 }
 
-func (a Address) String() string {
-	if a.Name == "" {
-		return a.Email
-	}
-	hasSpecials := func(text string) bool {
-		for i := 0; i < len(text); i++ {
-			switch c := text[i]; c {
-			case '(', ')', '<', '>', '[', ']', ':', ';', '@', '\\', ',', '.', '"':
-				return true
-			}
-		}
-		return false
-	}
-
-	var buf = bytes.NewBuffer(nil)
-	enc := mime.QEncoding.Encode("UTF-8", a.Name)
-	if enc == a.Name {
-		buf.WriteByte('"')
-		for i := 0; i < len(a.Name); i++ {
-			b := a.Name[i]
-			if b == '\\' || b == '"' {
-				buf.WriteByte('\\')
-			}
-			buf.WriteByte(b)
-		}
-		buf.WriteByte('"')
-	} else if hasSpecials(a.Name) {
-		buf.WriteString(mime.BEncoding.Encode("UTF-8", a.Name))
-	} else {
-		buf.WriteString(enc)
-	}
-	buf.WriteString(" <")
-	buf.WriteString(a.Email)
-	buf.WriteByte('>')
-	return buf.String()
+// ParseAddress takes format 'name@example.com', 'First Lastname <name@example.com> and so on
+func ParseAddress(address string) (*Address, error) {
+	a, err := mail.ParseAddress(address)
+	return &Address{
+		Name:  a.Name,
+		Email: a.Address,
+	}, err
 }
 
 type Attachment struct {

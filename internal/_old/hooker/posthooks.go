@@ -5,15 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/modfin/brev/internal/dao"
-	"github.com/modfin/brev/internal/signals"
+	dao2 "github.com/modfin/brev/internal/old/dao"
+	"github.com/modfin/brev/internal/old/signals"
 	"github.com/modfin/brev/tools"
 	"net/http"
 	"sync"
 	"time"
 )
 
-func New(ctx context.Context, db dao.DAO) *Posthooker {
+func New(ctx context.Context, db dao2.DAO) *Posthooker {
 	done := make(chan interface{})
 	m := &Posthooker{
 		done: done,
@@ -34,7 +34,7 @@ func New(ctx context.Context, db dao.DAO) *Posthooker {
 type Posthooker struct {
 	done   chan interface{}
 	ctx    context.Context
-	db     dao.DAO
+	db     dao2.DAO
 	closer func()
 }
 
@@ -61,7 +61,7 @@ func (p *Posthooker) Start(workers int) {
 func (p *Posthooker) start(workers int) error {
 
 	localDone := make(chan interface{})
-	hookChan := make(chan dao.Posthook, workers*2)
+	hookChan := make(chan dao2.Posthook, workers*2)
 
 	go func() {
 		select {
@@ -116,13 +116,13 @@ func (p *Posthooker) start(workers int) error {
 	}
 }
 
-func (p *Posthooker) worker(hooks <-chan dao.Posthook) {
+func (p *Posthooker) worker(hooks <-chan dao2.Posthook) {
 
 	workerId := tools.RandStringRunes(5)
 
 	fmt.Printf("[Hookr-Worker %s]: Starting worker\n", workerId)
 
-	send := func(hook dao.Posthook) {
+	send := func(hook dao2.Posthook) {
 		req, err := http.NewRequest("POST", hook.TargetUrl, bytes.NewBuffer([]byte(hook.Content)))
 		if err != nil {
 			fmt.Printf("[Hookr-Worker %s]: could not create request for target %s, err: %v\n", workerId, hook.TargetUrl, err)

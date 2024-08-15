@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modfin/brev"
-	"github.com/modfin/brev/internal/dao"
-	"github.com/modfin/brev/internal/signals"
+	dao2 "github.com/modfin/brev/internal/old/dao"
+	"github.com/modfin/brev/internal/old/signals"
 	"github.com/modfin/brev/smtpx"
 	"github.com/modfin/brev/smtpx/pool"
 	"github.com/modfin/brev/tools"
@@ -19,7 +19,7 @@ import (
 
 // Mail Transfer Agent, sending mails to where ever they should go
 
-func New(ctx context.Context, db dao.DAO, dialer smtpx.Dialer, localName string) *MTA {
+func New(ctx context.Context, db dao2.DAO, dialer smtpx.Dialer, localName string) *MTA {
 	done := make(chan interface{})
 	m := &MTA{
 		done: done,
@@ -41,7 +41,7 @@ func New(ctx context.Context, db dao.DAO, dialer smtpx.Dialer, localName string)
 type MTA struct {
 	done   chan interface{}
 	ctx    context.Context
-	db     dao.DAO
+	db     dao2.DAO
 	pool   *pool.Pool
 	closer func()
 }
@@ -68,7 +68,7 @@ func (m *MTA) Start(workers int) {
 
 func (m *MTA) start(workers int) error {
 
-	spool := make(chan dao.SpoolEmail, workers*2)
+	spool := make(chan dao2.SpoolEmail, workers*2)
 	localDone := make(chan interface{})
 	go func() {
 		select {
@@ -128,7 +128,7 @@ func (m *MTA) start(workers int) error {
 }
 
 type lg struct {
-	db            dao.DAO
+	db            dao2.DAO
 	workerId      string
 	transactionId int64
 	messageId     string
@@ -144,7 +144,7 @@ func (l *lg) Logf(format string, args ...interface{}) {
 	}
 }
 
-func (m *MTA) worker(spool chan dao.SpoolEmail) {
+func (m *MTA) worker(spool chan dao2.SpoolEmail) {
 
 	workerId := tools.RandStringRunes(5)
 
@@ -163,7 +163,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 		content, err := m.db.GetEmailContent(spoolmail.MessageId)
 		if err != nil {
 			logger.Logf("could not retrieve raw content of mail %s, err %v", spoolmail.MessageId, err)
-			err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+			err = m.db.SetEmailStatus(spoolmail.TransactionId, dao2.BrevStatusFailed)
 			if err != nil {
 				logger.Logf("got error updating status, err %v", err)
 			}
@@ -172,7 +172,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 		if len(spoolmail.MXServers) == 0 {
 			logger.Logf("could not find mx server for %v", spoolmail.Recipients)
-			err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+			err = m.db.SetEmailStatus(spoolmail.TransactionId, dao2.BrevStatusFailed)
 			if err != nil {
 				logger.Logf("got error updating status, err %v", err)
 			}
@@ -190,7 +190,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 			if !ok {
 				logger.Logf("failed transfer of emails for %v, err %v", spoolmail.Recipients, err)
-				err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+				err = m.db.SetEmailStatus(spoolmail.TransactionId, dao2.BrevStatusFailed)
 				if err != nil {
 					logger.Logf("got error updating status, err %v", err)
 				}
@@ -211,7 +211,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 			case 4: // might be graylising
 				if spoolmail.SendCount > 2 {
 					logger.Logf("failing transaction after third attempt, got code %d: %s ", terr.Code, terr.Msg)
-					err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+					err = m.db.SetEmailStatus(spoolmail.TransactionId, dao2.BrevStatusFailed)
 					if err != nil {
 						logger.Logf("got error updating status, err %v", err)
 					}
@@ -238,7 +238,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 
 			case 5:
 				logger.Logf("failing transaction got code %d: %s ", terr.Code, terr.Msg)
-				err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusFailed)
+				err = m.db.SetEmailStatus(spoolmail.TransactionId, dao2.BrevStatusFailed)
 				if err != nil {
 					logger.Logf("got error updating status, err %v", err)
 				}
@@ -253,7 +253,7 @@ func (m *MTA) worker(spool chan dao.SpoolEmail) {
 		}
 		logger.Logf("transferred emails through %s for %v, took %v", addr, spoolmail.Recipients, stop)
 
-		err = m.db.SetEmailStatus(spoolmail.TransactionId, dao.BrevStatusSent)
+		err = m.db.SetEmailStatus(spoolmail.TransactionId, dao2.BrevStatusSent)
 		if err != nil {
 			logger.Logf("could not update status to sent for %s, err %v\n", spoolmail.MessageId, err)
 			continue

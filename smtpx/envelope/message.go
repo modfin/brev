@@ -132,42 +132,6 @@ func (m *Envelope) SetHeaders(h map[string][]string) {
 	}
 }
 
-// SetAddressHeader sets an address to the given header field.
-func (m *Envelope) SetAddressHeader(field, address, name string) {
-	m.header[field] = []string{m.FormatAddress(address, name)}
-}
-
-// FormatAddress formats an address and a name as a valid RFC 5322 address.
-func (m *Envelope) FormatAddress(address, name string) string {
-	if name == "" {
-		return address
-	}
-
-	enc := m.encodeString(name)
-	if enc == name {
-		m.buf.WriteByte('"')
-		for i := 0; i < len(name); i++ {
-			b := name[i]
-			if b == '\\' || b == '"' {
-				m.buf.WriteByte('\\')
-			}
-			m.buf.WriteByte(b)
-		}
-		m.buf.WriteByte('"')
-	} else if hasSpecials(name) {
-		m.buf.WriteString(bEncoding.Encode(m.charset, name))
-	} else {
-		m.buf.WriteString(enc)
-	}
-	m.buf.WriteString(" <")
-	m.buf.WriteString(address)
-	m.buf.WriteByte('>')
-
-	addr := m.buf.String()
-	m.buf.Reset()
-	return addr
-}
-
 func hasSpecials(text string) bool {
 	for i := 0; i < len(text); i++ {
 		switch c := text[i]; c {

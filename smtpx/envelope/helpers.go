@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/modfin/brev"
 	"github.com/modfin/brev/smtpx/dkim"
+	"github.com/modfin/henry/compare"
+	"github.com/modfin/henry/slicez"
 	"io"
 	"net/textproto"
 	"strings"
@@ -46,18 +48,17 @@ func MarshalFromEmail(e *brev.Email, signer *dkim.Signer) ([]byte, error) {
 func From(email *brev.Email) (*Envelope, error) {
 	message := NewEnvelope()
 
-	for key, values := range email.Headers {
-		message.SetHeader(key, values...)
-	}
-	message.SetHeader("From", message.FormatAddress(email.From.Email, email.From.Name))
-	for _, to := range email.To {
-		message.AppendHeader("To", message.FormatAddress(to.Email, to.Name))
-	}
-	for _, cc := range email.Cc {
-		message.AppendHeader("Cc", message.FormatAddress(cc.Email, cc.Name))
-	}
-	message.SetHeader("Subject", email.Subject)
+	_ = email.Headers.Delete("return-path")
+	message.SetHeaders(email.Headers)
 
+	message.SetHeader("From", email.From.String())
+	to := slicez.Reject(email.To, compare.IsZero[*brev.Address]())
+	message.SetHeader("To", slicez.Map(to, func(a *brev.Address) string { return a.String() })...)
+
+	cc := slicez.Reject(email.Cc, compare.IsZero[*brev.Address]())
+	message.SetHeader("Cc", slicez.Map(cc, func(a *brev.Address) string { return a.String() })...)
+
+	message.SetHeader("Subject", email.Subject)
 	if email.HTML != "" && email.Text != "" {
 		// order is important, and apparently the text/plain part should go first in the multipart/alternative
 		// at least gmail picks the last alternative to display...

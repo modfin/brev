@@ -16,7 +16,6 @@ type TransferList struct {
 }
 
 var isIPAddress = regexp.MustCompile("^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")
-var hasPort = regexp.MustCompile("(:)[0-9]+$")
 
 type MXLookup func(emails []string) []TransferList
 
@@ -46,13 +45,10 @@ func LookupEmailMX(emails []string) []TransferList {
 			recs, _ = net.LookupMX(domain) // TODO: error?
 		}
 
-		slicez.SortFunc(recs, func(i, j *net.MX) bool {
+		slicez.SortBy(recs, func(i, j *net.MX) bool {
 			return i.Pref < j.Pref
 		})
 		var servers = slicez.Map(recs, func(rec *net.MX) string {
-			if hasPort.MatchString(rec.Host) {
-				return rec.Host
-			}
 			return rec.Host + ":25"
 		})
 

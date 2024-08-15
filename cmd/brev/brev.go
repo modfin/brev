@@ -13,12 +13,13 @@ import (
 	"github.com/modfin/brev/smtpx"
 	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/modfin/brev/tools"
+	"github.com/modfin/henry/compare"
+	"github.com/modfin/henry/mon"
 	"github.com/modfin/henry/slicez"
 	"github.com/urfave/cli/v2"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -32,7 +33,7 @@ func main() {
 				Name: "gen-dkim-keys",
 				Flags: []cli.Flag{
 					&cli.IntFlag{Name: "key-size", Value: 2048},
-					&cli.StringFlag{Name: "out", Value: "./"},
+					&cli.StringFlag{Name: "out", Value: "-"},
 				},
 				Action: gendkim,
 			},
@@ -83,6 +84,10 @@ func main() {
 				Name:  "msa",
 				Usage: "use specific Mail Submission Agent, eg example.com:587",
 			},
+			&cli.IntFlag{
+				Name:  "msa-port",
+				Usage: "will try to use specific port for the MSA server",
+			},
 			&cli.StringFlag{
 				Name:  "msa-user",
 				Usage: "username for the msa server",
@@ -118,17 +123,30 @@ func gendkim(c *cli.Context) (err error) {
 		Bytes: privateKeyBytes,
 	}
 
-	privatePemFile, err := os.Create(filepath.Join(c.String("out"), "dkim-private.pem"))
-	if err != nil {
-		fmt.Printf("error when create dkim-private.pem: %s \n", err)
-		return err
+	out := c.String("out")
+
+	var privatePemFile = os.Stdout
+	if out != "-" {
+		privatePemFile, err = os.Create(filepath.Join(c.String("out"), "dkim-private.pem"))
+		if err != nil {
+			fmt.Printf("error when create dkim-private.pem: %s \n", err)
+			return err
+		}
+		defer privatePemFile.Close()
 	}
-	defer privatePemFile.Close()
+
+	if privatePemFile == os.Stdout {
+		_, _ = os.Stdout.WriteString("==== Private Key ====\n")
+	}
 
 	err = pem.Encode(privatePemFile, privateKeyBlock)
 	if err != nil {
 		fmt.Printf("error when encode private pem: %s \n", err)
 		return err
+	}
+
+	if privatePemFile == os.Stdout {
+		_, _ = os.Stdout.WriteString("\n==== DNS Record ====\n")
 	}
 
 	publickey := &privatekey.PublicKey
@@ -138,15 +156,23 @@ func gendkim(c *cli.Context) (err error) {
 	}
 	pubRecord := fmt.Sprintf("v=DKIM1; k=rsa; p=%s;", base64.StdEncoding.EncodeToString(publickeyBytes))
 
-	pubRecordFile, err := os.Create(filepath.Join(c.String("out"), "dkim-pub.dns.txt"))
-	if err != nil {
-		return err
+	var pubRecordFile = os.Stdout
+	if out != "-" {
+		pubRecordFile, err = os.Create(filepath.Join(c.String("out"), "dkim-pub.dns.txt"))
+		if err != nil {
+			return err
+		}
+		defer pubRecordFile.Close()
 	}
-	defer pubRecordFile.Close()
 
 	_, err = pubRecordFile.Write([]byte(pubRecord))
 	if err != nil {
 		return err
+	}
+
+	if privatePemFile == os.Stdout {
+		_, _ = os.Stdout.WriteString("\n")
+
 	}
 
 	return nil
@@ -168,12 +194,40 @@ func (p printer) Logf(format string, args ...interface{}) {
 func sendmail(c *cli.Context) (err error) {
 
 	subject := c.String("subject")
-	from := brev.NewAddress(c.String("from"))
+
+	from, err := brev.ParseAddress(c.String("from"))
+	if err != nil || from == nil || from.Email == "" {
+		from = &brev.Address{}
+		from.Email, err = tools.SystemUri()
+		if err != nil {
+			return err
+		}
+	}
+
 	messageId := c.String("message-id")
 
-	to := slicez.Map(c.StringSlice("to"), brev.NewAddress)
-	cc := slicez.Map(c.StringSlice("cc"), brev.NewAddress)
-	bcc := slicez.Map(c.StringSlice("bcc"), brev.NewAddress)
+	parseAddr := func(a string) mon.Result[*brev.Address] {
+		add, err := brev.ParseAddress(a)
+		if err == nil {
+			return mon.Ok[*brev.Address](add)
+		}
+		return mon.Err[*brev.Address](err)
+	}
+
+	toR := slicez.Map(c.StringSlice("to"), parseAddr)
+	ccR := slicez.Map(c.StringSlice("cc"), parseAddr)
+	bccR := slicez.Map(c.StringSlice("bcc"), parseAddr)
+	e, found := slicez.Find(slicez.Concat(toR, ccR, bccR), func(m mon.Result[*brev.Address]) bool {
+		return !m.Ok()
+	})
+	if found {
+		fmt.Println("emails:123123", e.Error(), e.MustGet())
+		return e.Error()
+	}
+
+	to := slicez.Map(toR, func(a mon.Result[*brev.Address]) *brev.Address { return a.OrEmpty() })
+	cc := slicez.Map(ccR, func(a mon.Result[*brev.Address]) *brev.Address { return a.OrEmpty() })
+	bcc := slicez.Map(bccR, func(a mon.Result[*brev.Address]) *brev.Address { return a.OrEmpty() })
 
 	headers := c.StringSlice("header")
 
@@ -185,14 +239,6 @@ func sendmail(c *cli.Context) (err error) {
 	msaPass := c.String("msa-pass")
 
 	message := envelope.NewEnvelope()
-
-	if len(from.Email) == 0 {
-		from.Email, err = tools.SystemUri()
-		if err != nil {
-			return err
-		}
-	}
-
 	if len(messageId) == 0 {
 		messageId, err = smtpx.GenerateId()
 		if err != nil {
@@ -204,15 +250,10 @@ func sendmail(c *cli.Context) (err error) {
 	message.SetHeader("Subject", subject)
 	message.SetHeader("From", from.String())
 
-	var emails []brev.Address
+	var emails []*brev.Address
 
-	var portReg = regexp.MustCompile("(:)[0-9]+$")
-	tostr := func(s brev.Address) string {
-
-		return brev.Address{
-			Name:  s.Name,
-			Email: portReg.ReplaceAllString(s.Email, ""),
-		}.String()
+	tostr := func(s *brev.Address) string {
+		return s.String()
 	}
 
 	if len(to) > 0 {
@@ -226,7 +267,6 @@ func sendmail(c *cli.Context) (err error) {
 	if len(bcc) > 0 {
 		emails = append(emails, bcc...)
 	}
-
 	for _, h := range headers {
 		parts := strings.SplitN(h, ": ", 2)
 		if len(parts) != 2 {
@@ -255,7 +295,7 @@ func sendmail(c *cli.Context) (err error) {
 		message.Attach(a)
 	}
 
-	tomail := func(s brev.Address) string {
+	tomail := func(s *brev.Address) string {
 		return s.Email
 	}
 	emailstrs := slicez.Map(emails, tomail)
@@ -275,6 +315,8 @@ func sendmail(c *cli.Context) (err error) {
 		return errors.New("could not find any mx server to send mails to")
 	}
 
+	var logger smtpx.Logger = &printer{}
+
 	for _, mx := range transferlist {
 		if len(mx.MXServers) == 0 {
 			fmt.Println("could not find mx server for", mx.Emails)
@@ -283,22 +325,14 @@ func sendmail(c *cli.Context) (err error) {
 
 		mx.Emails = slicez.Uniq(mx.Emails)
 		addr := mx.MXServers[0]
-		fmt.Println("Transferring emails for", mx.Domain, "to mx", "smtp://"+addr)
+		logger.Logf("Transferring emails for %s to mx smtp://%s", mx.Domain, addr)
 		for _, t := range mx.Emails {
-			fmt.Println(" - ", t)
+			logger.Logf(" - %s", t)
 		}
 
-		from := portReg.ReplaceAllString(from.Email, "")
-		mails := slicez.Map(mx.Emails, func(addr string) string {
-			return portReg.ReplaceAllString(addr, "")
-		})
+		from := from.Email
 
-		var logger smtpx.Logger
-		if c.Bool("verbose") {
-			logger = &printer{}
-		}
-
-		err = smtpx.SendMail(logger, addr, "localhost", nil, from, mails, message)
+		err = smtpx.SendMail(compare.Ternary(c.Bool("verbose"), logger, nil), addr, "localhost", nil, from, mx.Emails, message)
 		if err != nil {
 			return
 		}

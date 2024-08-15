@@ -7,8 +7,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/modfin/brev"
 	"github.com/modfin/brev/dnsx"
-	"github.com/modfin/brev/internal/dao"
-	"github.com/modfin/brev/internal/signals"
+	dao2 "github.com/modfin/brev/internal/old/dao"
+	"github.com/modfin/brev/internal/old/signals"
 	"github.com/modfin/brev/smtpx/dkim"
 	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/modfin/brev/tools"
@@ -18,16 +18,16 @@ import (
 	"time"
 )
 
-func getApiKey(c echo.Context, db dao.DAO) (dao.ApiKey, error) {
+func getApiKey(c echo.Context, db dao2.DAO) (dao2.ApiKey, error) {
 	key := c.QueryParam("key")
 	if key == "" {
-		return dao.ApiKey{}, errors.New("an api key must be provided")
+		return dao2.ApiKey{}, errors.New("an api key must be provided")
 	}
 
 	return db.GetApiKey(key)
 }
 
-func validateFrom(key dao.ApiKey, email *brev.Email) error {
+func validateFrom(key dao2.ApiKey, email *brev.Email) error {
 	// if bad formatting
 	from := email.From
 	_, err := mail.ParseAddress(from.String())
@@ -73,7 +73,7 @@ func newMessageId(hostname string) string {
 	return fmt.Sprintf("%s=%s", uuid.New().String(), hostname)
 }
 
-func enqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname string, defaultMXDomain string, emailMxLookup dnsx.MXLookup) echo.HandlerFunc {
+func enqueueMTA(db dao2.DAO, dkimSelector string, signer *dkim.Signer, hostname string, defaultMXDomain string, emailMxLookup dnsx.MXLookup) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		key, err := getApiKey(c, db)
 		if err != nil {
@@ -131,13 +131,13 @@ func enqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 
 		transferlist := emailMxLookup(email.Recipients())
 
-		var spoolmails []dao.SpoolEmail = slicez.Map(transferlist, func(transfer dnsx.TransferList) (d dao.SpoolEmail) {
+		var spoolmails []dao2.SpoolEmail = slicez.Map(transferlist, func(transfer dnsx.TransferList) (d dao2.SpoolEmail) {
 			if transfer.Err != nil {
 				err = transfer.Err
 				fmt.Printf("[API] got error from dns lookup, %v", err)
 				return
 			}
-			return dao.SpoolEmail{
+			return dao2.SpoolEmail{
 				MessageId:  messageId,
 				ApiKey:     key.Key,
 				From:       returnPath, // From here is used in the smtp process and the return-path will be added by the receiver
@@ -145,7 +145,7 @@ func enqueueMTA(db dao.DAO, dkimSelector string, signer *dkim.Signer, hostname s
 				MXServers:  transfer.MXServers,
 			}
 		})
-		spoolmails = slicez.Reject(spoolmails, func(a dao.SpoolEmail) bool {
+		spoolmails = slicez.Reject(spoolmails, func(a dao2.SpoolEmail) bool {
 			return a.MessageId == ""
 		})
 

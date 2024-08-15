@@ -7,8 +7,8 @@ import (
 	"github.com/flashmob/go-guerrilla/backends"
 	"github.com/flashmob/go-guerrilla/mail"
 	"github.com/modfin/brev"
-	"github.com/modfin/brev/internal/config"
-	"github.com/modfin/brev/internal/dao"
+	"github.com/modfin/brev/internal/old/config"
+	dao2 "github.com/modfin/brev/internal/old/dao"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,10 +21,10 @@ type MSA struct {
 	cfg       *guerrilla.AppConfig
 	servercfg guerrilla.ServerConfig
 	daemon    guerrilla.Daemon
-	db        dao.DAO
+	db        dao2.DAO
 }
 
-func New(ctx context.Context, db dao.DAO, cfg *config.Config) (*MSA, error) {
+func New(ctx context.Context, db dao2.DAO, cfg *config.Config) (*MSA, error) {
 
 	fmt.Printf("[MSA]: Starting mail submission agent")
 
@@ -53,7 +53,7 @@ func New(ctx context.Context, db dao.DAO, cfg *config.Config) (*MSA, error) {
 	return &m, m.daemon.Start()
 }
 
-func handleBounce(db dao.DAO, bounceAddresses []string) backends.Result {
+func handleBounce(db dao2.DAO, bounceAddresses []string) backends.Result {
 
 	for _, address := range bounceAddresses {
 		address = strings.TrimPrefix(address, "bounces_")
@@ -72,7 +72,7 @@ func handleBounce(db dao.DAO, bounceAddresses []string) backends.Result {
 			continue // TODO log or something...
 		}
 
-		err = db.SetEmailStatus(transactionId, dao.BrevStatusFailed)
+		err = db.SetEmailStatus(transactionId, dao2.BrevStatusFailed)
 		if err != nil {
 			continue // TODO log or something...
 		}
@@ -95,7 +95,7 @@ func handleSendRequest(e *mail.Envelope) backends.Result {
 type ListInterface interface{}
 
 type backend struct {
-	db dao.DAO
+	db dao2.DAO
 }
 
 // Process processes then saves the mail envelope

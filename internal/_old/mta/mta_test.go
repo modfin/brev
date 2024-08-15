@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modfin/brev"
-	"github.com/modfin/brev/internal/dao"
-	"github.com/modfin/brev/internal/signals"
+	"github.com/modfin/brev/internal/old/dao"
+	"github.com/modfin/brev/internal/old/signals"
 	"github.com/modfin/brev/smtpx"
 	"io"
 	"math/rand"
@@ -327,29 +327,29 @@ func TestMTA(t *testing.T) {
 }
 
 /*
-func testLookup(lookupErr error) func(emails []string) []dnsx.TransferList {
-	return func(emails []string) []dnsx.TransferList {
-		if lookupErr != nil {
-			return []dnsx.TransferList{{Err: lookupErr}}
-		}
-		if len(emails) == 0 {
-			return nil
-		}
-		var mx []dnsx.TransferList
-		var buckets = map[string][]string{}
-		for _, address := range emails {
-			domain, err := tools.DomainOfEmail(address)
-			if err != nil {
-				continue
+	func testLookup(lookupErr error) func(emails []string) []dnsx.TransferList {
+		return func(emails []string) []dnsx.TransferList {
+			if lookupErr != nil {
+				return []dnsx.TransferList{{Err: lookupErr}}
 			}
-			buckets[domain] = append(buckets[domain], address)
+			if len(emails) == 0 {
+				return nil
+			}
+			var mx []dnsx.TransferList
+			var buckets = map[string][]string{}
+			for _, address := range emails {
+				domain, err := tools.DomainOfEmail(address)
+				if err != nil {
+					continue
+				}
+				buckets[domain] = append(buckets[domain], address)
+			}
+			for domain, addresses := range buckets {
+				mx = append(mx, dnsx.TransferList{Domain: domain, Emails: addresses, MXServers: []string{"127.0.0.1"}})
+			}
+			return mx
 		}
-		for domain, addresses := range buckets {
-			mx = append(mx, dnsx.TransferList{Domain: domain, Emails: addresses, MXServers: []string{"127.0.0.1"}})
-		}
-		return mx
 	}
-}
 */
 func spoolMails(id, from string, recipients []string) ([]dao.SpoolEmail, []byte) {
 	var transactionId int64

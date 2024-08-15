@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modfin/henry/slicez"
+	log "github.com/sirupsen/logrus"
 	"math/rand"
 	"os"
 	"os/user"
@@ -40,4 +41,17 @@ func RandStringRunes(n int) string {
 		b[i] = letterRunes[rand.Intn(len(letterRunes))]
 	}
 	return string(b)
+}
+
+type LoggerWho struct {
+	Name string
+}
+
+func (w LoggerWho) Levels() []log.Level {
+	return log.AllLevels
+}
+
+func (w LoggerWho) Fire(entry *log.Entry) error {
+	entry.Data["who"] = w.Name
+	return nil
 }

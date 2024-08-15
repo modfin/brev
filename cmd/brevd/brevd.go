@@ -2,55 +2,59 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"github.com/modfin/brev/internal/api"
-	"github.com/modfin/brev/internal/config"
-	"github.com/modfin/brev/internal/dao"
-	"github.com/modfin/brev/internal/hooker"
-	"github.com/modfin/brev/internal/msa"
-	"github.com/modfin/brev/internal/mta"
-	"github.com/modfin/brev/smtpx"
-	"github.com/modfin/henry/chanz"
+	"github.com/modfin/brev/tools"
+	log "github.com/sirupsen/logrus"
+	"github.com/urfave/cli/v2"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
 
 func main() {
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	cfg := config.Get()
-
-	db, err := dao.NewSQLite(cfg.DbURI)
-	if err != nil {
-		fmt.Println("could not connect to db", cfg.DbURI)
-		fmt.Println(err)
-		os.Exit(1)
+	app := &cli.App{
+		Name:   "brevd",
+		Usage:  "a service for sending emails",
+		Flags:  []cli.Flag{},
+		Action: start,
+		Commands: []*cli.Command{
+			{
+				Name:   "serve",
+				Action: start,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "default-host",
+						EnvVars: []string{"BREV_DEFAULT_HOST"},
+						Usage: "the default host name, the host name that the MX records points to. eg. the 'brev-server.com' in the following case\n" +
+							"dig MX example.com\n" +
+							"example.com.     60  IN   CNAME   mx.example.com\n" +
+							"mx.example.com.  60  IN   MX      10 brev-server.com",
+					},
+				},
+			},
+		},
 	}
 
-	for _, key := range cfg.APIKeys {
-		err := db.EnsureApiKey(key)
-		if err != nil {
-			fmt.Println("could not ensure api-key, err:", err)
-			os.Exit(1)
-		}
+	if err := app.Run(os.Args); err != nil {
+		log.Fatal(err)
 	}
 
-	apiDone := api.Init(ctx, db, cfg)
-	_, err = msa.New(ctx, db, config.Get())
-	if err != nil {
-		fmt.Println("could not start MSA", cfg.DbURI)
-		fmt.Println(err)
-		os.Exit(1)
-	}
+}
 
-	hook := hooker.New(ctx, db)
-	hook.Start(2)
+func start(c *cli.Context) error {
+	l := log.New()
 
-	transferAgent := mta.New(ctx, db, smtpx.NewConnection, cfg.Hostname)
-	transferAgent.Start(5)
+	l.AddHook(tools.LoggerWho{Name: "brevd"})
+
+	var stopServer func()
+	c.Context, stopServer = context.WithCancel(c.Context)
+	defer stopServer()
+
+	l.Infof("Starting server")
+
+	var services []Stoppable
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc,
@@ -59,22 +63,38 @@ func main() {
 		syscall.SIGTERM,
 		syscall.SIGQUIT)
 
-	select {
-	case sig := <-sigc:
-		fmt.Println("SIGNAL:", sig.String())
-	case <-apiDone:
-		fmt.Println("[Brev]: Unexpected closing of api server")
-	case <-transferAgent.Done():
-		fmt.Println("[Brev]: Unexpected closing of mta server")
-	case <-hook.Done():
-		fmt.Println("[Brev]: Unexpected closing of posthook sender")
+	sig := <-sigc
+	log.Infof("Got signal: %s, shutting down", sig)
+
+	shutdownCtx, _ := context.WithTimeout(c.Context, 30*time.Second)
+
+	wg := &sync.WaitGroup{}
+	for _, service := range services {
+		wg.Add(1)
+		service := service
+		go func(service Stoppable) {
+			defer wg.Done()
+			err := service.Stop(shutdownCtx)
+			if err != nil {
+				l.WithError(err).Error("Failed to stop service")
+			}
+		}(service)
+
 	}
 
-	fmt.Println("[Brev]: Initiating server shutdown")
-	cancel()
-	select {
-	case <-chanz.EveryDone(apiDone, transferAgent.Done(), hook.Done()):
-	case <-time.After(10 * time.Second):
-	}
-	fmt.Println("[Brev]: Shutdown complete, terminating now")
+	go func() {
+		<-shutdownCtx.Done()
+		l.WithError(shutdownCtx.Err()).Warn("Shutdown was forced, terminating now")
+		os.Exit(1)
+	}()
+
+	wg.Wait()
+	l.Infof("Shutdown complete, terminating now")
+	os.Exit(1)
+
+	return nil
+}
+
+type Stoppable interface {
+	Stop(ctx context.Context) error
 }
