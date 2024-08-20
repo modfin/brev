@@ -18,6 +18,9 @@ require (
 require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.3 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/emersion/go-msgauth v0.6.8 // indirect
+	github.com/juju/errors v1.0.0 // indirect
+	github.com/juju/mutex v0.0.0-20180619145857-d21b13acf4bf // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

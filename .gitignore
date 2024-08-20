@@ -5,3 +5,4 @@ brev.sqlite-wal
 dkim-private.*
 dkim-pub.*
 run.sh
+spool-data

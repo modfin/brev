@@ -1,48 +1,51 @@
 package envelope
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"github.com/modfin/brev"
-	"github.com/modfin/brev/smtpx/dkim"
+	"github.com/modfin/brev/smtpx/envelope/kim"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
 	"io"
-	"net/textproto"
-	"strings"
 )
 
-func MarshalFromEmail(e *brev.Email, signer *dkim.Signer) ([]byte, error) {
+func Marshal(e *brev.Email, signer *kim.Signer) (io.Reader, error) {
 	env, err := From(e)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not convert email to envelope, err %v\n", err)
 	}
-	b, err := env.Bytes()
+
+	r, err := env.Reader()
+
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not convert envelope to bytes, err %v\n", err)
 	}
 
 	if signer != nil {
-		r := textproto.NewReader(bufio.NewReader(bytes.NewReader(b)))
-		headers, err := r.ReadMIMEHeader()
+		pr, pw := io.Pipe()
+
+		fmt.Println("signing copyt")
+		var buf = bytes.Buffer{}
+		_, err = io.Copy(&buf, r)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("could not copy envelope to buffer, err %v\n", err)
 		}
-		for header, _ := range headers {
-			lower := strings.ToLower(header)
-			if lower == "return-path" || lower[0] == 'x' { // don't sign unnecessary headers
-				continue
-			}
-			signer = signer.With(dkim.OpAddHeader(strings.ToLower(header)))
-		}
-		err = signer.Sign(&b)
+		fmt.Println(buf.String())
+
+		go func() {
+			err := signer.Sign(pw, &buf)
+			_ = pw.CloseWithError(err)
+		}()
+
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("could not sign envelope, err %v\n", err)
 		}
+		return pr, nil
 	}
-	return b, nil
+	return r, nil
 }
 
 func From(email *brev.Email) (*Envelope, error) {
@@ -51,12 +54,25 @@ func From(email *brev.Email) (*Envelope, error) {
 	_ = email.Headers.Delete("return-path")
 	message.SetHeaders(email.Headers)
 
+	if email.From == nil {
+		return nil, errors.New("email must have a from address")
+	}
+
 	message.SetHeader("From", email.From.String())
+
 	to := slicez.Reject(email.To, compare.IsZero[*brev.Address]())
 	message.SetHeader("To", slicez.Map(to, func(a *brev.Address) string { return a.String() })...)
 
 	cc := slicez.Reject(email.Cc, compare.IsZero[*brev.Address]())
 	message.SetHeader("Cc", slicez.Map(cc, func(a *brev.Address) string { return a.String() })...)
+
+	if len(email.Subject) == 0 {
+		return nil, errors.New("email must have a subject")
+	}
+
+	if len(email.HTML) == 0 && len(email.Text) == 0 {
+		return nil, errors.New("email must have content, html or text must be provided")
+	}
 
 	message.SetHeader("Subject", email.Subject)
 	if email.HTML != "" && email.Text != "" {

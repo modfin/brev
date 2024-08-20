@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
 	"github.com/modfin/brev"
 	"github.com/modfin/brev/dnsx"
 	dao2 "github.com/modfin/brev/internal/old/dao"
@@ -124,7 +123,7 @@ func enqueueMTA(db dao2.DAO, dkimSelector string, signer *dkim.Signer, hostname 
 			With(dkim.OpDomain(key.Domain)).
 			With(dkim.OpSelector(dkimSelector))
 
-		content, err := envelope.MarshalFromEmail(email, localSigner)
+		content, err := envelope.Marshal(email, localSigner)
 		if err != nil {
 			return fmt.Errorf("failed to marshal envelop, err %v", err)
 		}

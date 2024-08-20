@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -55,17 +56,6 @@ func NewEnvelope(settings ...Setting) *Envelope {
 	return m
 }
 
-// Reset resets the message so it can be reused. The message keeps its previous
-// settings so it is in the same state that after a call to NewEnvelope.
-func (m *Envelope) Reset() {
-	for k := range m.header {
-		delete(m.header, k)
-	}
-	m.parts = nil
-	m.attachments = nil
-	m.embedded = nil
-}
-
 func (m *Envelope) applySettings(settings []Setting) {
 	for _, s := range settings {
 		s(m)
@@ -106,13 +96,11 @@ const (
 
 // SetHeader sets a value to the given header field.
 func (m *Envelope) SetHeader(field string, value ...string) {
+	if len(value) == 0 {
+		return
+	}
 	m.encodeHeader(value)
 	m.header[field] = value
-}
-
-func (m *Envelope) AppendHeader(field string, value ...string) {
-	m.encodeHeader(value)
-	m.header[field] = append(m.header[field], value...)
 }
 
 func (m *Envelope) encodeHeader(values []string) {
@@ -302,6 +290,17 @@ func (m *Envelope) WriteTo(w io.Writer) (int64, error) {
 	mw := &messageWriter{w: w}
 	mw.writeMessage(m)
 	return mw.n, mw.err
+}
+
+func (m *Envelope) Reader() (io.Reader, error) {
+	r, w := io.Pipe()
+	go func() {
+		fmt.Println("Starting to write to pipe")
+		_, err := m.WriteTo(w)
+		fmt.Println("Done to write to pipe")
+		w.CloseWithError(err)
+	}()
+	return r, nil
 }
 
 // Bytes renders and returns the envelope in byte form

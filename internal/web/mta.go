@@ -14,15 +14,14 @@ import (
 )
 
 func respond(w http.ResponseWriter, code int, message string) {
-	w.WriteHeader(500)
-	w.Write([]byte("could not parse body"))
+	w.WriteHeader(code)
+	w.Write([]byte(message))
 }
 
 func mta(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		ctx := r.Context()
-
+		//ctx := r.Context()
 		key := r.URL.Query().Get("key")
 		if len(key) > 0 {
 			r.Header.Set("Authorization", "Basic "+key)
@@ -40,10 +39,11 @@ func mta(s *Server) http.HandlerFunc {
 
 		defer r.Body.Close()
 
-		var email *brev.Email
+		var email = &brev.Email{}
 		dec := json.NewDecoder(r.Body)
-		err := dec.Decode(&email)
+		err := dec.Decode(email)
 		if err != nil {
+
 			respond(w, http.StatusBadRequest, "could not parse body")
 			return
 		}
@@ -54,34 +54,38 @@ func mta(s *Server) http.HandlerFunc {
 			return
 		}
 
+		if email.Headers == nil {
+			email.Headers = brev.Headers{}
+		}
+
 		// Overwriting Date
 		email.Headers.Set("Date", []string{time.Now().In(time.UTC).Format(time.RFC1123Z)})
 
-		id := xid.New().String()
-		host = compare.Coalesce(host, s.config.DefaultHost)
-		messageId := fmt.Sprintf("%s@%s", email.Metadata.Id, host)
+		eid := xid.New()
+		host = compare.Coalesce(host, s.cfg.DefaultHost)
+		messageId := fmt.Sprintf("%s@%s", eid.String(), host)
 		//Overwriting Message-ID
 		email.Headers.Set("Message-ID", []string{messageId})
 
-		email.Metadata.Id = id
+		email.Metadata.Id = eid
 		email.Metadata.ReturnPath = fmt.Sprintf("bounce-%s", messageId)
 
 		if email.Metadata.Conversation && !email.Headers.Has("Reply-To") {
 			replyto := brev.Address{
 				Name:  email.From.Name,
-				Email: fmt.Sprintf("conv-%s-%s@%s", email.Metadata.Id, strings.ReplaceAll(email.From.Email, "@", "="), host),
+				Email: fmt.Sprintf("conv-%s-%s@%s", eid.String(), strings.ReplaceAll(email.From.Email, "@", "="), host),
 			}
 			email.Headers.Set("Reply-To", []string{replyto.String()})
 		}
 
-		err = s.spool.Enqueue(email, nil) // todo add signer.
+		err = s.spool.Enqueue(email, s.cfg.Signer) // todo add signer.
 		if err != nil {
 			respond(w, http.StatusInternalServerError, "could not enqueue email")
 			return
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id":         email.Metadata.Id,
+			"id":         eid.String(),
 			"message_id": messageId,
 		})
 	}

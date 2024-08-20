@@ -2,6 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"fmt"
+	"github.com/modfin/brev/internal/clix"
+	"github.com/modfin/brev/internal/spool"
+	"github.com/modfin/brev/internal/web"
+	"github.com/modfin/brev/smtpx/envelope/kim"
 	"github.com/modfin/brev/tools"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -19,6 +27,7 @@ func main() {
 		Usage:  "a service for sending emails",
 		Flags:  []cli.Flag{},
 		Action: start,
+
 		Commands: []*cli.Command{
 			{
 				Name:   "serve",
@@ -32,6 +41,27 @@ func main() {
 							"example.com.     60  IN   CNAME   mx.example.com\n" +
 							"mx.example.com.  60  IN   MX      10 brev-server.com",
 					},
+					&cli.StringFlag{
+						Name:    "http-interface",
+						EnvVars: []string{"BREV_HTTP_INTERFACE"},
+					},
+					&cli.IntFlag{
+						Name:    "http-port",
+						Value:   8080,
+						EnvVars: []string{"BREV_HTTP_PORT"},
+					},
+
+					&cli.StringFlag{
+						Name:    "spool-dir",
+						Value:   "./spool",
+						EnvVars: []string{"BREV_SPOOL_DIR"},
+					},
+
+					&cli.StringFlag{
+						Name:    "dkim-key",
+						Value:   "./spool",
+						EnvVars: []string{"BREV_SPOOL_DIR"},
+					},
 				},
 			},
 		},
@@ -44,6 +74,11 @@ func main() {
 }
 
 func start(c *cli.Context) error {
+
+	var cfg = clix.Parse[Config](c)
+
+	fmt.Printf("%+v\n", cfg)
+
 	l := log.New()
 
 	l.AddHook(tools.LoggerWho{Name: "brevd"})
@@ -52,9 +87,36 @@ func start(c *cli.Context) error {
 	c.Context, stopServer = context.WithCancel(c.Context)
 	defer stopServer()
 
-	l.Infof("Starting server")
+	l.Infof("Starting brevd")
 
 	var services []Stoppable
+
+	spool, err := spool.New(cfg.Spool)
+	if err != nil {
+		return err
+	}
+	spool.Start()
+	services = append(services, spool)
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("could not generate rsa key: %w", err)
+	}
+	cfg.Web.Signer, err = kim.New(&kim.SignOptions{
+		Domain:                 "example.com",
+		Selector:               "test",
+		Signer:                 pk,
+		Hash:                   crypto.SHA256,
+		HeaderCanonicalization: "relaxed",
+		BodyCanonicalization:   "relaxed",
+	})
+	if err != nil {
+		return fmt.Errorf("could not create signer: %w", err)
+	}
+
+	ht := web.New(c.Context, cfg.Web, spool)
+	ht.Start()
+	services = append(services, ht)
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc,
@@ -97,4 +159,9 @@ func start(c *cli.Context) error {
 
 type Stoppable interface {
 	Stop(ctx context.Context) error
+}
+
+type Config struct {
+	Web   web.Config
+	Spool spool.Config
 }

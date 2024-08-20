@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
+	"github.com/rs/xid"
 	"net/mail"
 	"strings"
 )
@@ -66,7 +67,7 @@ func (h Headers) Delete(key string) []string {
 type Metadata struct {
 	Conversation bool   `json:"conversation"`
 	ReturnPath   string `json:"return_path"`
-	Id           string `json:"id"`
+	Id           xid.ID `json:"id"`
 }
 
 type Email struct {
