@@ -127,6 +127,11 @@ func gendkim(c *cli.Context) (err error) {
 
 	var privatePemFile = os.Stdout
 	if out != "-" {
+		err = os.MkdirAll(c.String("out"), 0755)
+		if err != nil {
+			fmt.Printf("error when create directory: %s \n", err)
+			return err
+		}
 		privatePemFile, err = os.Create(filepath.Join(c.String("out"), "dkim-private.pem"))
 		if err != nil {
 			fmt.Printf("error when create dkim-private.pem: %s \n", err)

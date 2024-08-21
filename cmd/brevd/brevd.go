@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
 	"fmt"
 	"github.com/modfin/brev/internal/clix"
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/internal/web"
-	"github.com/modfin/brev/smtpx/envelope/kim"
+	"github.com/modfin/brev/smtpx/envelope/signer"
 	"github.com/modfin/brev/tools"
 	log "github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -55,12 +52,52 @@ func main() {
 						Name:    "spool-dir",
 						Value:   "./spool",
 						EnvVars: []string{"BREV_SPOOL_DIR"},
+						Usage:   "the directory where the email spool will be stored",
 					},
 
 					&cli.StringFlag{
+						Name:     "dkim-domain",
+						Required: true,
+						EnvVars:  []string{"BREV_DKIM_DOMAIN"},
+						Usage:    "the domain to sign emails with, eg. 'brev-server.com'",
+					},
+					&cli.StringFlag{
+						Name:     "dkim-selector",
+						Required: true,
+						EnvVars:  []string{"BREV_DKIM_SELECTOR"},
+						Usage:    "the selector to use for signing emails, eg. 'test', resulting in DNS/TXT test._domainkey.brev-server.com containing public key",
+					},
+					&cli.StringFlag{
 						Name:    "dkim-key",
-						Value:   "./spool",
-						EnvVars: []string{"BREV_SPOOL_DIR"},
+						EnvVars: []string{"BREV_DKIM_KEY"},
+						Usage:   "the private key to use for signing emails, a armored PEM file",
+					},
+					&cli.StringFlag{
+						Name:    "dkim-key-file",
+						EnvVars: []string{"BREV_DKIM_KEY_FILE"},
+						Usage:   "the private key to use for signing emails, a file path to a armored PEM file",
+					},
+					&cli.StringFlag{
+						Name:  "dkim-canonicalization-header",
+						Usage: "can be 'simple' or 'relaxed'",
+						Value: "relaxed",
+						Action: func(c *cli.Context, s string) error {
+							if s != "simple" && s != "relaxed" {
+								return fmt.Errorf("invalid value for dkim-canonicalization-header, must be 'simple' or 'relaxed'")
+							}
+							return nil
+						},
+					},
+					&cli.StringFlag{
+						Name:  "dkim-canonicalization-body",
+						Usage: "can be 'simple' or 'relaxed'",
+						Value: "relaxed",
+						Action: func(c *cli.Context, s string) error {
+							if s != "simple" && s != "relaxed" {
+								return fmt.Errorf("invalid value dkim-canonicalization-body, must be 'simple' or 'relaxed'")
+							}
+							return nil
+						},
 					},
 				},
 			},
@@ -98,18 +135,8 @@ func start(c *cli.Context) error {
 	spool.Start()
 	services = append(services, spool)
 
-	pk, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return fmt.Errorf("could not generate rsa key: %w", err)
-	}
-	cfg.Web.Signer, err = kim.New(&kim.SignOptions{
-		Domain:                 "example.com",
-		Selector:               "test",
-		Signer:                 pk,
-		Hash:                   crypto.SHA256,
-		HeaderCanonicalization: "relaxed",
-		BodyCanonicalization:   "relaxed",
-	})
+	// TODO validate that private key matches up with public key in DNS record provided by domain and selector
+	cfg.Web.Signer, err = signer.New(cfg.DKIM)
 	if err != nil {
 		return fmt.Errorf("could not create signer: %w", err)
 	}
@@ -164,4 +191,5 @@ type Stoppable interface {
 type Config struct {
 	Web   web.Config
 	Spool spool.Config
+	DKIM  signer.Config
 }

@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/modfin/henry/mapz"
+	"github.com/modfin/henry/slicez"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -100,6 +102,7 @@ func (m *Envelope) SetHeader(field string, value ...string) {
 		return
 	}
 	m.encodeHeader(value)
+	m.DeleteHeader(field)
 	m.header[field] = value
 }
 
@@ -141,9 +144,34 @@ func (m *Envelope) FormatDate(date time.Time) string {
 	return date.Format(MessageDateFormat)
 }
 
+// DeleteHeader gets a header field.
+func (m *Envelope) DeleteHeader(field string) {
+	DeleteHeader(m.header, field)
+}
+
 // GetHeader gets a header field.
 func (m *Envelope) GetHeader(field string) []string {
-	return m.header[field]
+	return GetHeader(m.header, field)
+}
+
+func DeleteHeader(headers map[string][]string, field string) {
+	field, found := slicez.Find(mapz.Keys(headers), func(s string) bool {
+		return strings.ToLower(s) == strings.ToLower(field)
+	})
+	if !found {
+		return
+	}
+	delete(headers, field)
+}
+
+func GetHeader(headers map[string][]string, field string) []string {
+	field, found := slicez.Find(mapz.Keys(headers), func(s string) bool {
+		return strings.ToLower(s) == strings.ToLower(field)
+	})
+	if !found {
+		return nil
+	}
+	return headers[field]
 }
 
 // SetBody sets the body of the message. It replaces any content previously set
@@ -292,15 +320,15 @@ func (m *Envelope) WriteTo(w io.Writer) (int64, error) {
 	return mw.n, mw.err
 }
 
-func (m *Envelope) Reader() (io.Reader, error) {
-	r, w := io.Pipe()
+func (m *Envelope) Reader() io.Reader {
+	pr, pw := io.Pipe()
 	go func() {
 		fmt.Println("Starting to write to pipe")
-		_, err := m.WriteTo(w)
+		_, err := m.WriteTo(pw)
 		fmt.Println("Done to write to pipe")
-		w.CloseWithError(err)
+		pw.CloseWithError(err)
 	}()
-	return r, nil
+	return pr
 }
 
 // Bytes renders and returns the envelope in byte form
@@ -311,11 +339,12 @@ func (m *Envelope) Bytes() ([]byte, error) {
 }
 
 func (w *messageWriter) writeMessage(m *Envelope) {
-	if _, ok := m.header["Mime-Version"]; !ok {
-		w.writeString("Mime-Version: 1.0\r\n")
+
+	if len(m.GetHeader("MIME-Version")) == 0 {
+		m.SetHeader("MIME-Version", "1.0")
 	}
-	if _, ok := m.header["Date"]; !ok {
-		w.writeHeader("Date", m.FormatDate(now()))
+	if len(m.GetHeader("Date")) == 0 {
+		m.SetHeader("Date", m.FormatDate(now()))
 	}
 	w.writeHeaders(m.header)
 
@@ -530,9 +559,33 @@ func (w *messageWriter) writeLine(s string, charsLeft int) string {
 	return ""
 }
 
+func orderHeader(headers []string) []string {
+	order := []string{
+		"From",
+		"To",
+		"Cc",
+		"Bcc",
+		"Subject",
+		"Date",
+		"Message-ID",
+		"Reply-To",
+		"In-Reply-To",
+		"References",
+		"MIME-Version",
+		"Content-Type",
+		"Content-Transfer-Encoding",
+	}
+
+	intr := slicez.IntersectionBy(strings.ToLower, order, headers)
+	compl := slicez.Sort(slicez.ComplementBy(strings.ToLower, intr, headers))
+	return append(compl, intr...)
+
+}
+
 func (w *messageWriter) writeHeaders(h map[string][]string) {
 	if w.depth == 0 {
-		for k, v := range h {
+		for _, k := range orderHeader(mapz.Keys(h)) {
+			v := GetHeader(h, k)
 			if k != "Bcc" {
 				w.writeHeader(k, v...)
 			}

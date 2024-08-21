@@ -117,8 +117,10 @@ func (c *client) updateKeySettings(ctx context.Context, targetServer TargetServe
 }
 
 type Receipt struct {
-	MessageId      string  `json:"message_id"`
-	TransactionIds []int64 `json:"transaction_ids"`
+	EmailId   string   `json:"eid"`
+	MessageId string   `json:"message_id"`
+	From      string   `json:"from"`
+	Recpt     []string `json:"rcpt"`
 }
 
 func (c *client) getServer() TargetServer {

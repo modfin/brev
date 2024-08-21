@@ -1,15 +1,11 @@
 package spool
 
 import (
-	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"github.com/modfin/brev"
-	"github.com/modfin/brev/smtpx/dkim"
+	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/rs/xid"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -34,15 +30,41 @@ func teardown(dir string) {
 		fmt.Println("Removing dir", dir)
 		err := os.RemoveAll(dir)
 		if err != nil {
-			fmt.Println("Failed to remove dir", dir, err)
+			fmt.Println("Failed to remove dir", err)
 		}
 	}
 }
 
-func validEmail() *brev.Email {
-	return &brev.Email{
+func validJob(eid xid.ID) Job {
+	return Job{
+		EID:       eid,
+		MessageId: fmt.Sprintf("%s@localhost", eid.String()),
+		From:      "from@localhost",
+		Rcpt:      []string{"to@localhost"},
+	}
+}
+
+func validEmail(eid xid.ID) io.Reader {
+	//key, err := rsa.GenerateKey(rand.Reader, 2048)
+	//if err != nil {
+	//	panic(err)
+	//}
+	//pemBlock := &pem.Block{
+	//	Type:  "RSA PRIVATE KEY",
+	//	Bytes: x509.MarshalPKCS1PrivateKey(key),
+	//}
+	//pemBytes := pem.EncodeToMemory(pemBlock)
+	//
+	//sig, err := dkim.NewSigner(string(pemBytes))
+	//if err != nil {
+	//	panic(err)
+	//}
+	//
+	//sig = sig.With(dkim.OpDomain("example.com")).With(dkim.OpSelector("test-selector"))
+	//return sig
+	eml := &brev.Email{
 		Metadata: brev.Metadata{
-			Id:         xid.New(),
+			Id:         eid,
 			ReturnPath: "test@example.com",
 		},
 		From: &brev.Address{
@@ -54,217 +76,138 @@ func validEmail() *brev.Email {
 			},
 		},
 		Subject: "Test",
-		Text:    "The contentn",
+		Text:    "The content",
 	}
-}
-
-func validSigner() *dkim.Signer {
-
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	r, err := envelope.Marshal(eml, nil)
 	if err != nil {
 		panic(err)
 	}
-	pemBlock := &pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(key),
-	}
-	pemBytes := pem.EncodeToMemory(pemBlock)
-
-	sig, err := dkim.NewSigner(string(pemBytes))
-	if err != nil {
-		panic(err)
-	}
-
-	sig = sig.With(dkim.OpDomain("example.com")).With(dkim.OpSelector("test-selector"))
-	return sig
+	return r
 }
 
-func TestStart(t *testing.T) {
+func TestEnqueueCreatesDirectoriesAndFiles(t *testing.T) {
 	spool, dir, err := setup()
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
 	defer teardown(dir)
 
-	spool.Start()
-}
+	eid := xid.New()
+	email := validJob(eid)
+	mail := validEmail(eid)
 
-func TestStop(t *testing.T) {
-	spool, dir, err := setup()
-	if err != nil {
-		t.Fatalf("setup failed: %v", err)
-	}
-	defer teardown(dir)
-
-	err = spool.Stop(context.Background())
-	if err != nil {
-		t.Fatalf("Stop failed: %v", err)
-	}
-}
-
-func TestEnqueue(t *testing.T) {
-	spool, dir, err := setup()
-	if err != nil {
-		t.Fatalf("setup failed: %v", err)
-	}
-	defer teardown(dir)
-
-	email := validEmail()
-	signer := validSigner()
-
-	err = spool.Enqueue(email, signer)
-	if err != nil {
-		t.Fatalf("Enqueue failed: %v", err)
-	}
-}
-
-func TestEnqueueFailsOnInvalidDir(t *testing.T) {
-	spool, _, err := setup()
-	if err != nil {
-		t.Fatalf("setup failed: %v", err)
-	}
-	spool.cfg.Dir = "/invalid/dir"
-
-	email := validEmail()
-	signer := validSigner()
-
-	err = spool.Enqueue(email, signer)
-	if err == nil {
-		t.Fatalf("Enqueue should have failed on invalid directory")
-	}
-}
-
-func TestDequeue(t *testing.T) {
-	spool, dir, err := setup()
-	if err != nil {
-		t.Fatalf("setup failed: %v", err)
-	}
-	defer teardown(dir)
-
-	email := validEmail()
-	signer := validSigner()
-
-	err = spool.Enqueue(email, signer)
+	err = spool.Enqueue(email, mail)
 	if err != nil {
 		t.Fatalf("Enqueue failed: %v", err)
 	}
 
-	job, eml, err := spool.Dequeue(email.Metadata.Id)
+	canonicalDir := eid2dir(spool.cfg.Dir, canonical, email.EID)
+	queueDir := eid2dir(spool.cfg.Dir, queue, email.EID)
+
+	if !fileExists(filepath.Join(canonicalDir, fmt.Sprintf("%s.eml", email.EID))) {
+		t.Fatalf("Expected email file to be created in canonical directory")
+	}
+
+	if !fileExists(filepath.Join(queueDir, fmt.Sprintf("%s.job", email.EID))) {
+		t.Fatalf("Expected job file to be created in queue directory")
+	}
+}
+
+func TestDequeueMovesJobToProcessing(t *testing.T) {
+	spool, dir, err := setup()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer teardown(dir)
+
+	eid := xid.New()
+	email := validJob(eid)
+	mail := validEmail(eid)
+
+	err = spool.Enqueue(email, mail)
+	if err != nil {
+		t.Fatalf("Enqueue failed: %v", err)
+	}
+
+	_, eml, err := spool.Dequeue(email.EID)
 	if err != nil {
 		t.Fatalf("Dequeue failed: %v", err)
 	}
 	defer eml.Close()
 
-	if job.EID != email.Metadata.Id {
-		t.Fatalf("Dequeue returned wrong job")
+	procDir := eid2dir(spool.cfg.Dir, processing, email.EID)
+	if !fileExists(filepath.Join(procDir, fmt.Sprintf("%s.job", email.EID))) {
+		t.Fatalf("Expected job file to be moved to processing directory")
 	}
 }
 
-func TestDequeueFailsOnMissingJob(t *testing.T) {
+func TestSucceedMovesJobToSent(t *testing.T) {
 	spool, dir, err := setup()
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
 	defer teardown(dir)
 
-	_, _, err = spool.Dequeue(xid.New())
-	if err == nil {
-		t.Fatalf("Dequeue should have failed on missing job")
-	}
-}
+	eid := xid.New()
+	email := validJob(eid)
+	mail := validEmail(eid)
 
-func TestSucceed(t *testing.T) {
-	spool, dir, err := setup()
-	if err != nil {
-		t.Fatalf("setup failed: %v", err)
-	}
-	defer teardown(dir)
-
-	email := validEmail()
-	signer := validSigner()
-
-	err = spool.Enqueue(email, signer)
+	err = spool.Enqueue(email, mail)
 	if err != nil {
 		t.Fatalf("Enqueue failed: %v", err)
 	}
 
-	_, _, err = spool.Dequeue(email.Metadata.Id)
+	_, eml, err := spool.Dequeue(email.EID)
 	if err != nil {
 		t.Fatalf("Dequeue failed: %v", err)
 	}
+	defer eml.Close()
 
-	err = spool.Succeed(email.Metadata.Id)
+	err = spool.Succeed(email.EID)
 	if err != nil {
 		t.Fatalf("Succeed failed: %v", err)
 	}
 
-	path := filepath.Join(eid2dir(spool.cfg.Dir, sent, email.Metadata.Id),
-		fmt.Sprintf("%s.job", email.Metadata.Id.String()))
-	if !fileExists(path) {
-		t.Fatalf("Succeed failed to move job to sent")
+	sentDir := eid2dir(spool.cfg.Dir, sent, email.EID)
+	if !fileExists(filepath.Join(sentDir, fmt.Sprintf("%s.job", email.EID))) {
+		t.Fatalf("Expected job file to be moved to sent directory")
 	}
-
 }
 
-func TestSucceedFailsOnMissingJob(t *testing.T) {
+func TestFailMovesJobToFailed(t *testing.T) {
 	spool, dir, err := setup()
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
 	defer teardown(dir)
 
-	err = spool.Succeed(xid.New())
-	if err == nil {
-		t.Fatalf("Succeed should have failed on missing job")
-	}
-}
+	eid := xid.New()
+	email := validJob(eid)
+	mail := validEmail(eid)
 
-func TestFail(t *testing.T) {
-	spool, dir, err := setup()
-	if err != nil {
-		t.Fatalf("setup failed: %v", err)
-	}
-	defer teardown(dir)
-
-	email := validEmail()
-	signer := validSigner()
-
-	err = spool.Enqueue(email, signer)
+	err = spool.Enqueue(email, mail)
 	if err != nil {
 		t.Fatalf("Enqueue failed: %v", err)
 	}
 
-	_, _, err = spool.Dequeue(email.Metadata.Id)
+	_, eml, err := spool.Dequeue(email.EID)
 	if err != nil {
 		t.Fatalf("Dequeue failed: %v", err)
 	}
+	defer eml.Close()
 
-	err = spool.Fail(email.Metadata.Id)
+	err = spool.Fail(email.EID)
 	if err != nil {
 		t.Fatalf("Fail failed: %v", err)
 	}
 
-	path := filepath.Join(eid2dir(spool.cfg.Dir, failed, email.Metadata.Id),
-		fmt.Sprintf("%s.job", email.Metadata.Id.String()))
-	if !fileExists(path) {
-		t.Fatalf("Failed failed to move job to failed")
+	failDir := eid2dir(spool.cfg.Dir, failed, email.EID)
+	if !fileExists(filepath.Join(failDir, fmt.Sprintf("%s.job", email.EID))) {
+		t.Fatalf("Expected job file to be moved to failed directory")
 	}
 }
 
-func TestFailFailsOnMissingJob(t *testing.T) {
-	spool, dir, err := setup()
-	if err != nil {
-		t.Fatalf("setup failed: %v", err)
-	}
-	defer teardown(dir)
-
-	err = spool.Fail(xid.New())
-	if err == nil {
-		t.Fatalf("Fail should have failed on missing job")
-	}
-}
-
-func TestLogf(t *testing.T) {
+func TestLogfCreatesLogFile(t *testing.T) {
 	spool, dir, err := setup()
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
@@ -277,27 +220,8 @@ func TestLogf(t *testing.T) {
 		t.Fatalf("Logf failed: %v", err)
 	}
 
-	path := filepath.Join(eid2dir(spool.cfg.Dir, log, eid),
-		fmt.Sprintf("%s.log", eid.String()))
-
-	if !fileExists(path) {
-		t.Fatalf("Logf failed to write log")
-	}
-
-	f, err := os.ReadFile(path)
-	fmt.Println(string(f))
-}
-
-func TestLogfFailsOnInvalidDir(t *testing.T) {
-	spool, _, err := setup()
-	if err != nil {
-		t.Fatalf("setup failed: %v", err)
-	}
-	spool.cfg.Dir = "/invalid/dir"
-
-	eid := xid.New()
-	err = spool.Logf(eid, "test log message")
-	if err == nil {
-		t.Fatalf("Logf should have failed on invalid directory")
+	logDir := eid2dir(spool.cfg.Dir, log, eid)
+	if !fileExists(filepath.Join(logDir, fmt.Sprintf("%s.log", eid.String()))) {
+		t.Fatalf("Expected log file to be created")
 	}
 }

@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	github.com/alitto/pond v1.9.1 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.3 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emersion/go-msgauth v0.6.8 // indirect

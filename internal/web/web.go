@@ -8,7 +8,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/labstack/gommon/log"
 	"github.com/modfin/brev/internal/spool"
-	"github.com/modfin/brev/smtpx/envelope/kim"
+	"github.com/modfin/brev/smtpx/envelope/signer"
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/compare"
 	"github.com/sirupsen/logrus"
@@ -20,7 +20,7 @@ type Config struct {
 	HttpInterface string `cli:"http-interface"`
 	HttpPort      int    `cli:"http-port"`
 
-	Signer *kim.Signer
+	Signer *signer.Signer
 }
 
 func New(ctx context.Context, cfg Config, spool *spool.Spool) *Server {

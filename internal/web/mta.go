@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modfin/brev"
+	"github.com/modfin/brev/internal/spool"
+	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
 	"github.com/rs/xid"
@@ -78,16 +80,27 @@ func mta(s *Server) http.HandlerFunc {
 			email.Headers.Set("Reply-To", []string{replyto.String()})
 		}
 
-		err = s.spool.Enqueue(email, s.cfg.Signer) // todo add signer.
+		emlreader, err := envelope.Marshal(email, s.cfg.Signer)
+		if err != nil {
+			respond(w, http.StatusInternalServerError, "could not marshal email")
+			return
+
+		}
+
+		job := spool.Job{
+			EID:       email.Metadata.Id,
+			MessageId: messageId,
+			From:      email.Metadata.ReturnPath,
+			Rcpt:      email.Recipients(),
+		}
+		err = s.spool.Enqueue(job, emlreader) // todo add signer.
 		if err != nil {
 			respond(w, http.StatusInternalServerError, "could not enqueue email")
 			return
 		}
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id":         eid.String(),
-			"message_id": messageId,
-		})
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode(job)
 	}
 }
 

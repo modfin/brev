@@ -6,44 +6,27 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modfin/brev"
-	"github.com/modfin/brev/smtpx/envelope/kim"
+	"github.com/modfin/brev/smtpx/envelope/signer"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
 	"io"
 )
 
-func Marshal(e *brev.Email, signer *kim.Signer) (io.Reader, error) {
+func Marshal(e *brev.Email, signer *signer.Signer) (io.Reader, error) {
 	env, err := From(e)
 	if err != nil {
 		return nil, fmt.Errorf("could not convert email to envelope, err %v\n", err)
 	}
 
-	r, err := env.Reader()
-
-	if err != nil {
-		return nil, fmt.Errorf("could not convert envelope to bytes, err %v\n", err)
-	}
+	r := env.Reader()
 
 	if signer != nil {
 		pr, pw := io.Pipe()
-
-		fmt.Println("signing copyt")
-		var buf = bytes.Buffer{}
-		_, err = io.Copy(&buf, r)
-		if err != nil {
-			return nil, fmt.Errorf("could not copy envelope to buffer, err %v\n", err)
-		}
-		fmt.Println(buf.String())
-
-		go func() {
-			err := signer.Sign(pw, &buf)
+		go func(r io.Reader) {
+			err := signer.Sign(pw, r)
 			_ = pw.CloseWithError(err)
-		}()
-
-		if err != nil {
-			return nil, fmt.Errorf("could not sign envelope, err %v\n", err)
-		}
-		return pr, nil
+		}(r)
+		r = pr
 	}
 	return r, nil
 }

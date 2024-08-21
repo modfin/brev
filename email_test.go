@@ -14,7 +14,7 @@ func TestAddressIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	fmt.Println("name", addr.Name)
-	fmt.Println("addr", addr.Address)
+	fmt.Println("addr", addr.Email)
 
 	var a rfc5321.RFC5322
 	l, err := a.Address([]byte("john.doe@[192.0.2.1]"))
