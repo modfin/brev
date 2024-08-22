@@ -1,6 +1,9 @@
 package mta
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"github.com/alitto/pond"
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/tools"
@@ -20,6 +23,10 @@ type MTA struct {
 
 	ostart sync.Once
 	ostop  sync.Once
+
+	pool *pond.WorkerPool
+
+	mx *mx
 }
 
 func New(cfg Config, spool spool.Spooler) *MTA {
@@ -31,38 +38,57 @@ func New(cfg Config, spool spool.Spooler) *MTA {
 		spooler: spool,
 		cfg:     cfg,
 		log:     logger,
+		mx:      newMX(),
 	}
 }
 
 func (m *MTA) Start() {
+
 	m.ostart.Do(func() {
-		m.start()
+		go m.start()
 	})
+
 }
 
 func (m *MTA) start() {
 
-	pool := pond.New(100, 0, pond.MinWorkers(runtime.NumCPU()))
+	m.log.Infof("Starting mta, with %d-100 workers", runtime.NumCPU())
+	m.pool = pond.New(100, 0, pond.MinWorkers(runtime.NumCPU()))
 
 	for eid := range m.spooler.Start() {
 		eid := eid
-		pool.Submit(m.send(eid))
+
+		if m.pool.Stopped() {
+			m.log.WithField("eid", eid).Warn("pool stopped, skipping email")
+			continue
+		}
+
+		m.pool.Submit(m.send(eid))
 	}
+	m.pool.StopAndWait()
 }
 
 func (m *MTA) send(eid xid.ID) func() {
 	return func() {
 		job, in, err := m.spooler.Dequeue(eid)
-		defer in.Close()
+
+		// This happens since we travers the filesystem inb the spool. This keeps the memory bound since we do not need to keep track of all emails in memory
+		if errors.Is(err, spool.ErrNotFound) {
+			m.log.WithField("eid", eid).Warn("email not found, skipping, (concurrent dequeue might happen with dir traversals)")
+			return
+		}
+
 		if err != nil {
 			m.spooler.Logf(eid, "could not dequeue email %s, err: %v", eid.String(), err)
 			err = m.spooler.Fail(eid)
 			return
 		}
+		defer in.Close()
 
-		groups, err := GroupEmails(job.Rcpt)
+		groups, err := m.mx.GroupEmails(job.Rcpt)
 		if err != nil {
 			m.spooler.Logf(eid, "could not group all emails %s, err: %v", eid.String(), err)
+			m.spooler.Fail(eid)
 			return
 		}
 		if len(groups) == 0 {
@@ -87,16 +113,27 @@ func (m *MTA) send(eid xid.ID) func() {
 				}
 			}
 
-			// TODO send enqueue email group
-			//https://github.com/knadh/smtppool
+			// TODO smtp route email
+			fmt.Println(domain, group.Servers)
 
 		}
+
+		m.spooler.Succeed(eid)
 
 	}
 }
 
-func (m *MTA) Stop() {
+func (m *MTA) Stop(ctx context.Context) error {
+	var err error
 	m.ostop.Do(func() {
 
+		select {
+		case <-m.pool.Stop().Done():
+			m.log.Info("mta has been shut down")
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+
 	})
+	return err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/modfin/brev/internal/clix"
+	"github.com/modfin/brev/internal/mta"
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/internal/web"
 	"github.com/modfin/brev/smtpx/envelope/signer"
@@ -135,15 +136,20 @@ func start(c *cli.Context) error {
 	spool.Start()
 	services = append(services, spool)
 
+	mta := mta.New(cfg.MTA, spool)
+	mta.Start()
+
+	services = append(services, mta)
+
 	// TODO validate that private key matches up with public key in DNS record provided by domain and selector
 	cfg.Web.Signer, err = signer.New(cfg.DKIM)
 	if err != nil {
 		return fmt.Errorf("could not create signer: %w", err)
 	}
 
-	ht := web.New(c.Context, cfg.Web, spool)
-	ht.Start()
-	services = append(services, ht)
+	http := web.New(c.Context, cfg.Web, spool)
+	http.Start()
+	services = append(services, http)
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc,
@@ -192,4 +198,5 @@ type Config struct {
 	Web   web.Config
 	Spool spool.Config
 	DKIM  signer.Config
+	MTA   mta.Config
 }

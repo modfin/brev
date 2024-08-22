@@ -33,7 +33,7 @@ type Job struct {
 	MessageId   string   `json:"message_id"`
 	From        string   `json:"from"`
 	Rcpt        []string `json:"rcpt"`
-	Retries     int      `json:"retries,omitempty"`
+	Fails       int      `json:"Fails,omitempty"`
 	SuccessRcpt []string `json:"success_rcpt,omitempty"`
 }
 
@@ -48,6 +48,8 @@ type Spool struct {
 
 	start sync.Once
 	stop  sync.Once
+
+	sig chan struct{}
 }
 
 type ReadSeekCloserCloner interface {
@@ -72,13 +74,21 @@ func (s *Spool) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (s *Spool) Start() <-chan xid.ID {
-	s.start.Do(func() {
-		s.ctx, s.cancel = context.WithCancel(compare.Coalesce(s.ctx, context.Background()))
-		a, _ := filepath.Abs(s.cfg.Dir)
-		s.log.Infof("Starting spool using %s", compare.Coalesce(a, s.cfg.Dir))
+func (s *Spool) sigEnqueue() {
+	select {
+	case s.sig <- struct{}{}:
+	default:
+	}
+}
 
-		filepath.WalkDir(filepath.Join(s.cfg.Dir, queue), func(path string, d fs.DirEntry, err error) error {
+func (s *Spool) startProducer() {
+	dir := filepath.Join(s.cfg.Dir, queue)
+
+	for {
+
+		<-s.sig // Should contain stuff if there is something waiting or to be checked if waiting
+		s.log.Debug("walking queue dir")
+		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if filepath.Ext(path) != ".job" {
 				return nil
 			}
@@ -89,17 +99,30 @@ func (s *Spool) Start() <-chan xid.ID {
 				s.log.WithError(err).Errorf("could not parse xid from %s", path)
 				return err
 			}
-			go func() {
-				s.log.Infof("Requeuing %s", eid.String())
-				select {
-				case <-s.ctx.Done():
-				case s.queue <- eid:
-				}
-			}()
+
+			// TODO keep track of recently enqueued emails to avoid re-enqueuing or refactor to dequeue and not just send the reference
+
+			s.log.Infof("enqueuing %s from %s to chan", eid.String(), dir)
+
+			s.queue <- eid
 
 			return nil
 		})
+
+	}
+}
+
+func (s *Spool) Start() <-chan xid.ID {
+	s.start.Do(func() {
+		s.ctx, s.cancel = context.WithCancel(compare.Coalesce(s.ctx, context.Background()))
+		a, _ := filepath.Abs(s.cfg.Dir)
+		s.log.Infof("Starting spool using %s", compare.Coalesce(a, s.cfg.Dir))
+
+		s.sigEnqueue()
+		go s.startProducer()
+
 	})
+
 	return s.queue
 }
 
@@ -154,8 +177,9 @@ func New(config Config) (*Spool, error) {
 		cfg:   config,
 		log:   logger,
 		mu:    tools.NewKeyedMutex(),
-		queue: make(chan xid.ID, 1), // maybe 0
+		queue: make(chan xid.ID), // ensures there is a handover.
 		ctx:   context.Background(),
+		sig:   make(chan struct{}, 1),
 	}, nil
 }
 
@@ -223,19 +247,10 @@ func (s *Spool) Enqueue(job Job, email io.Reader) error {
 		return errors.Join(err, os.Remove(emailPath), os.Remove(jobPath))
 	}
 
-	go func() {
-		select {
-		case <-s.ctx.Done():
-		case s.queue <- job.EID:
-		}
-	}()
+	s.sigEnqueue()
 
 	return s.Logf(job.EID, "email has been written to disk and enqueued")
 
-}
-
-func (s *Spool) Queue() <-chan xid.ID {
-	return s.queue
 }
 
 func (s *Spool) Logf(eid xid.ID, format string, args ...interface{}) (err error) {
@@ -282,6 +297,8 @@ func (s *Spool) lograw(eid xid.ID, data []byte) (err error) {
 
 }
 
+var ErrNotFound = errors.New("not found")
+
 func (s *Spool) Dequeue(eid xid.ID) (*Job, ReadSeekCloserCloner, error) {
 	s.mu.Lock(eid.String())
 	defer s.mu.Unlock(eid.String())
@@ -293,7 +310,7 @@ func (s *Spool) Dequeue(eid xid.ID) (*Job, ReadSeekCloserCloner, error) {
 	jobFilename := fmt.Sprintf("%s.job", eid)
 
 	if !fileExists(filepath.Join(queuedir, jobFilename)) {
-		return nil, nil, fmt.Errorf("could not find job file in queue dir, %s", filepath.Join(queuedir, jobFilename))
+		return nil, nil, fmt.Errorf("could not find job file in queue dir, %s, err: %w", filepath.Join(queuedir, jobFilename), ErrNotFound)
 	}
 
 	emlFilename := fmt.Sprintf("%s.eml", eid)
@@ -318,7 +335,12 @@ func (s *Spool) Dequeue(eid xid.ID) (*Job, ReadSeekCloserCloner, error) {
 
 	var head Job
 	err = json.Unmarshal(job, &head)
-	return &head, &readerfile{eml}, err
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not unmarshal job, %w", err)
+	}
+
+	_ = s.Logf(eid, "email had been deququed for processing")
+	return &head, &readerfile{eml}, nil
 }
 
 func (s *Spool) Succeed(eid xid.ID) error {
@@ -343,6 +365,8 @@ func (s *Spool) Succeed(eid xid.ID) error {
 	if err != nil {
 		return fmt.Errorf("could not move job file to sent: %w", err)
 	}
+
+	_ = s.Logf(eid, "email had been successfully sent")
 
 	return nil
 }
@@ -369,6 +393,8 @@ func (s *Spool) Fail(eid xid.ID) error {
 	if err != nil {
 		return fmt.Errorf("could not move job file to sent: %w", err)
 	}
+
+	_ = s.Logf(eid, "email has failed to send")
 
 	return nil
 }
