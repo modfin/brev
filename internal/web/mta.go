@@ -92,6 +92,8 @@ func mta(s *Server) http.HandlerFunc {
 			MessageId: messageId,
 			From:      email.Metadata.ReturnPath,
 			Rcpt:      email.Recipients(),
+
+			LocalName: s.cfg.DefaultHost,
 		}
 		err = s.spool.Enqueue(job, emlreader) // todo add signer.
 		if err != nil {

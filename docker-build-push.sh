@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 VERSION=$(date +%Y-%m-%dT%H.%M.%S)-$(git log -1 --pretty=format:"%h")
-NAME=brev
+NAME=brev2
 IMAGE_NAME=modfin/${NAME}
 
 docker build -f ./Dockerfile \

@@ -18,23 +18,122 @@ import (
 	"time"
 )
 
+type Config struct {
+	Dir string `cli:"spool-dir"`
+}
+
+const log string = "log"
+const canonical string = "canonical"
+
+const queue string = "queue"
+const processing string = "processing"
+const sent string = "sent"
+const failed string = "failed"
+const retry string = "retry"
+
+// TODO replace with a interface of an FS enabling the use of eg s3 and gcs instead of local disk
+
 type Spooler interface {
-	Start() <-chan xid.ID
 	Stop(ctx context.Context) error
 	Enqueue(job Job, email io.Reader) error
-	Dequeue(eid xid.ID) (*Job, ReadSeekCloserCloner, error)
-	Succeed(eid xid.ID) error
-	Fail(eid xid.ID) error
-	Logf(eid xid.ID, format string, args ...interface{}) error
+	Queue() <-chan *Job
+
+	//Dequeue(eid xid.ID) (*Job, error)
+	//Succeed(eid xid.ID) error
+	//Fail(eid xid.ID) error
+	//Logf(eid xid.ID, format string, args ...interface{}) error
 }
 
 type Job struct {
-	EID         xid.ID   `json:"eid"`
-	MessageId   string   `json:"message_id"`
-	From        string   `json:"from"`
-	Rcpt        []string `json:"rcpt"`
-	Fails       int      `json:"Fails,omitempty"`
-	SuccessRcpt []string `json:"success_rcpt,omitempty"`
+	EID       xid.ID   `json:"eid"`
+	MessageId string   `json:"message_id"`
+	From      string   `json:"from"`
+	Rcpt      []string `json:"rcpt"`
+
+	LocalName string `json:"local_name"`
+
+	emlPath string
+	spool   *Spool
+}
+
+func (j *Job) Status(eid xid.ID) (string, error) {
+	if j.spool == nil {
+		return "", fmt.Errorf("job has not been initialized and has no reference to spool")
+	}
+	return j.spool.Status(eid)
+}
+
+func (j *Job) Requeue() error {
+	if j.spool == nil {
+		return fmt.Errorf("job has not been initialized and has no reference to spool")
+	}
+	return j.spool.Requeue(j.EID)
+}
+
+func (j *Job) Fail() error {
+	if j.spool == nil {
+		return fmt.Errorf("job has not been initialized and has no reference to spool")
+	}
+	return j.spool.Fail(j.EID)
+}
+
+func (j *Job) Success() error {
+	if j.spool == nil {
+		return fmt.Errorf("job has not been initialized and has no reference to spool")
+	}
+	return j.spool.Succeed(j.EID)
+}
+
+func (j *Job) Reader() (io.ReadSeekCloser, error) {
+	if j.spool == nil {
+		return nil, fmt.Errorf("job has not been initialized and has no reference to spool")
+	}
+
+	eml, err := os.OpenFile(j.emlPath, os.O_RDONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("could not open eml file: %w", err)
+	}
+	return eml, nil
+}
+func (j *Job) WriteTo(w io.Writer) (n int64, err error) {
+	if j.spool == nil {
+		return 0, fmt.Errorf("job has not been initialized and has no reference to spool")
+	}
+	r, err := j.Reader()
+	if err != nil {
+		return 0, fmt.Errorf("could not get reader: %w", err)
+	}
+	return io.Copy(w, r)
+}
+
+func (j *Job) Logf(format string, args ...any) error {
+	return j.spool.Logf(j.EID, format, args...)
+}
+
+func New(config Config, lc *tools.Logger) (*Spool, error) {
+
+	logger := lc.New("spool")
+
+	for _, dir := range []string{log, queue, processing, sent, failed, retry} {
+		var err error
+		err = os.MkdirAll(filepath.Join(config.Dir, dir), 0755)
+		if err != nil {
+			return nil, fmt.Errorf("could not create directory: %w", err)
+		}
+	}
+
+	s := &Spool{
+		cfg:   config,
+		log:   logger,
+		mu:    tools.NewKeyedMutex(),
+		queue: make(chan *Job), // ensures there is a handover.
+		ctx:   context.Background(),
+		sig:   make(chan struct{}, 1),
+	}
+
+	s.start()
+	return s, nil
+
 }
 
 type Spool struct {
@@ -44,30 +143,32 @@ type Spool struct {
 	log   *logrus.Logger
 	mu    *tools.KeyedMutex
 	cfg   Config
-	queue chan xid.ID
+	queue chan *Job
 
-	start sync.Once
-	stop  sync.Once
+	ostart sync.Once
+	ostop  sync.Once
 
 	sig chan struct{}
 }
 
-type ReadSeekCloserCloner interface {
-	io.ReadSeekCloser
-	Clone() (ReadSeekCloserCloner, error)
+func (s *Spool) start() {
+	s.ostart.Do(func() {
+		s.ctx, s.cancel = context.WithCancel(compare.Coalesce(s.ctx, context.Background()))
+		a, _ := filepath.Abs(s.cfg.Dir)
+		s.log.Infof("Starting spool using %s", compare.Coalesce(a, s.cfg.Dir))
+
+		s.sigEnqueue()
+		go s.startProducer()
+
+	})
 }
 
-type readerfile struct {
-	*os.File
-}
-
-func (f *readerfile) Clone() (ReadSeekCloserCloner, error) {
-	ff, err := os.OpenFile(f.Name(), os.O_RDONLY, 0644)
-	return &readerfile{ff}, err
+func (s *Spool) Queue() <-chan *Job {
+	return s.queue
 }
 
 func (s *Spool) Stop(ctx context.Context) error {
-	s.stop.Do(func() {
+	s.ostop.Do(func() {
 		s.cancel()
 		close(s.queue)
 	})
@@ -104,7 +205,12 @@ func (s *Spool) startProducer() {
 
 			s.log.Infof("enqueuing %s from %s to chan", eid.String(), dir)
 
-			s.queue <- eid
+			job, err := s.Dequeue(eid)
+			if err != nil {
+				s.log.WithError(err).Errorf("could not dequeue %s", eid.String())
+				return err
+			}
+			s.queue <- job // Blocking until the job is consumed
 
 			return nil
 		})
@@ -112,76 +218,9 @@ func (s *Spool) startProducer() {
 	}
 }
 
-func (s *Spool) Start() <-chan xid.ID {
-	s.start.Do(func() {
-		s.ctx, s.cancel = context.WithCancel(compare.Coalesce(s.ctx, context.Background()))
-		a, _ := filepath.Abs(s.cfg.Dir)
-		s.log.Infof("Starting spool using %s", compare.Coalesce(a, s.cfg.Dir))
-
-		s.sigEnqueue()
-		go s.startProducer()
-
-	})
-
-	return s.queue
-}
-
-type Config struct {
-	Dir string `cli:"spool-dir"`
-}
-
-const log string = "log"
-const canonical string = "canonical"
-const queue string = "queue"
-const processing string = "processing"
-const sent string = "sent"
-const failed string = "failed"
-
-const retry string = "retry"
-
 // Probably implment file locking
 // https://github.com/juju/fslock
 // https://github.com/juju/mutex
-
-func New(config Config) (*Spool, error) {
-
-	logger := logrus.New()
-	logger.AddHook(tools.LoggerWho{Name: "spool"})
-
-	var err error
-	err = os.MkdirAll(filepath.Join(config.Dir, log), 0755)
-	if err != nil {
-		return nil, fmt.Errorf("could not create directory: %w", err)
-	}
-
-	err = os.MkdirAll(filepath.Join(config.Dir, queue), 0755)
-	if err != nil {
-		return nil, fmt.Errorf("could not create directory: %w", err)
-	}
-	err = os.MkdirAll(filepath.Join(config.Dir, processing), 0755)
-	if err != nil {
-		return nil, fmt.Errorf("could not create directory: %w", err)
-	}
-
-	err = os.MkdirAll(filepath.Join(config.Dir, sent), 0755)
-	if err != nil {
-		return nil, fmt.Errorf("could not create directory: %w", err)
-	}
-
-	err = os.MkdirAll(filepath.Join(config.Dir, retry), 0755)
-	if err != nil {
-		return nil, fmt.Errorf("could not create directory: %w", err)
-	}
-
-	return &Spool{
-		cfg:   config,
-		log:   logger,
-		mu:    tools.NewKeyedMutex(),
-		queue: make(chan xid.ID), // ensures there is a handover.
-		ctx:   context.Background(),
-		sig:   make(chan struct{}, 1),
-	}, nil
-}
 
 func (s *Spool) Enqueue(job Job, email io.Reader) error {
 	s.mu.Lock(job.EID.String())
@@ -299,9 +338,10 @@ func (s *Spool) lograw(eid xid.ID, data []byte) (err error) {
 
 var ErrNotFound = errors.New("not found")
 
-func (s *Spool) Dequeue(eid xid.ID) (*Job, ReadSeekCloserCloner, error) {
+func (s *Spool) Dequeue(eid xid.ID) (*Job, error) {
 	s.mu.Lock(eid.String())
 	defer s.mu.Unlock(eid.String())
+	var err error
 
 	emldir := eid2dir(s.cfg.Dir, canonical, eid)
 	queuedir := eid2dir(s.cfg.Dir, queue, eid)
@@ -310,37 +350,50 @@ func (s *Spool) Dequeue(eid xid.ID) (*Job, ReadSeekCloserCloner, error) {
 	jobFilename := fmt.Sprintf("%s.job", eid)
 
 	if !fileExists(filepath.Join(queuedir, jobFilename)) {
-		return nil, nil, fmt.Errorf("could not find job file in queue dir, %s, err: %w", filepath.Join(queuedir, jobFilename), ErrNotFound)
-	}
-
-	emlFilename := fmt.Sprintf("%s.eml", eid)
-	eml, err := os.OpenFile(filepath.Join(emldir, emlFilename), os.O_RDONLY, 0644)
-	if err != nil {
-		return nil, nil, fmt.Errorf("could not open eml file: %w", err)
+		err = fmt.Errorf("could not find job file in queue dir, %s, err: %w", filepath.Join(queuedir, jobFilename), ErrNotFound)
+		_ = s.Logf(eid, "faild to dequeue email: %s", err.Error())
+		return nil, err
 	}
 
 	err = os.MkdirAll(procdir, 0755)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not create processing directory: %w", err)
+		err = fmt.Errorf("could not create processing directory: %w", err)
+		_ = s.Logf(eid, "faild to dequeue email: %s", err.Error())
+		return nil, err
 	}
 	err = os.Rename(filepath.Join(queuedir, jobFilename), filepath.Join(procdir, jobFilename))
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not rename job file: %w", err)
+		err = fmt.Errorf("could not rename job file: %w", err)
+		_ = s.Logf(eid, "faild to dequeue email: %s", err.Error())
+		return nil, err
 	}
 
-	job, err := os.ReadFile(filepath.Join(procdir, jobFilename))
+	data, err := os.ReadFile(filepath.Join(procdir, jobFilename))
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not read job file: %w", err)
+		err = fmt.Errorf("could not read job file: %w", err)
+		_ = s.Logf(eid, "faild to dequeue email: %s", err.Error())
+		return nil, err
 	}
 
-	var head Job
-	err = json.Unmarshal(job, &head)
+	var job Job
+
+	err = json.Unmarshal(data, &job)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not unmarshal job, %w", err)
+		err = fmt.Errorf("could not unmarshal job, %w", err)
+		_ = s.Logf(eid, "faild to dequeue email: %s", err.Error())
+		return nil, err
+	}
+
+	job.spool = s
+	job.emlPath = filepath.Join(emldir, fmt.Sprintf("%s.eml", eid))
+	if !fileExists(job.emlPath) {
+		err = fmt.Errorf("email file, %s, does not exist", job.emlPath)
+		_ = s.Logf(eid, "faild to dequeue email: %s", err.Error())
+		return nil, err
 	}
 
 	_ = s.Logf(eid, "email had been deququed for processing")
-	return &head, &readerfile{eml}, nil
+	return &job, nil
 }
 
 func (s *Spool) Succeed(eid xid.ID) error {
@@ -397,6 +450,51 @@ func (s *Spool) Fail(eid xid.ID) error {
 	_ = s.Logf(eid, "email has failed to send")
 
 	return nil
+}
+
+func (s *Spool) Requeue(eid xid.ID) error {
+	s.mu.Lock(eid.String())
+	defer s.mu.Unlock(eid.String())
+
+	var err error
+	var status string
+	for _, dir := range []string{queue, processing, sent, failed} {
+		if fileExists(eid2dir(s.cfg.Dir, dir, eid)) {
+			status = dir
+			break
+		}
+	}
+	if status == "" {
+		return fmt.Errorf("could not find any reference to job %s", eid.String())
+	}
+	if status == queue {
+		return fmt.Errorf("job %s is already in queue", eid.String())
+	}
+
+	from := eid2dir(s.cfg.Dir, status, eid)
+	to := eid2dir(s.cfg.Dir, queue, eid)
+	jobFilename := fmt.Sprintf("%s.job", eid)
+	err = os.Rename(filepath.Join(from, jobFilename), filepath.Join(to, jobFilename))
+	if err != nil {
+		return fmt.Errorf("could not move job file from %s to queu: %w", status, err)
+	}
+
+	_ = s.Logf(eid, "email has been requeued, moved from '%s' to 'queue'", status)
+
+	return nil
+}
+
+func (s *Spool) Status(eid xid.ID) (string, error) {
+	s.mu.Lock(eid.String())
+	defer s.mu.Unlock(eid.String())
+
+	for _, dir := range []string{queue, processing, sent, failed} {
+		if fileExists(eid2dir(s.cfg.Dir, dir, eid)) {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("could not find any reference to job %s", eid.String())
+
 }
 
 func eid2dir(prefix string, catalog string, eid xid.ID) string {

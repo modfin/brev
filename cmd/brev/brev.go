@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/modfin/brev"
-	"github.com/modfin/brev/dnsx"
 	"github.com/modfin/brev/smtpx"
 	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/modfin/brev/tools"
@@ -18,8 +17,10 @@ import (
 	"github.com/modfin/henry/slicez"
 	"github.com/urfave/cli/v2"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -245,10 +246,7 @@ func sendmail(c *cli.Context) (err error) {
 
 	message := envelope.NewEnvelope()
 	if len(messageId) == 0 {
-		messageId, err = smtpx.GenerateId()
-		if err != nil {
-			return err
-		}
+		messageId = smtpx.GenerateId()
 	}
 
 	message.SetHeader("Message-ID", fmt.Sprintf("<%s>", messageId))
@@ -314,7 +312,7 @@ func sendmail(c *cli.Context) (err error) {
 		return smtpx.SendMail(nil, msaServer, "localhost", auth, from.Email, emailstrs, message)
 	}
 
-	transferlist := dnsx.LookupEmailMX(emailstrs)
+	transferlist := LookupEmailMX(emailstrs)
 
 	if len(transferlist) == 0 {
 		return errors.New("could not find any mx server to send mails to")
@@ -344,4 +342,60 @@ func sendmail(c *cli.Context) (err error) {
 	}
 
 	return nil
+}
+
+type TransferList struct {
+	Domain    string
+	Emails    []string
+	MXServers []string
+	Err       error
+}
+
+var isIPAddress = regexp.MustCompile("^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")
+
+type MXLookup func(emails []string) []TransferList
+
+func LookupEmailMX(emails []string) []TransferList {
+	var mx []TransferList
+
+	emails = slicez.Map(emails, strings.ToLower)
+	var buckets = slicez.GroupBy(emails, func(email string) string {
+		domain, err := tools.DomainOfEmail(email)
+		if err != nil {
+			return ""
+		}
+		return domain
+	})
+	delete(buckets, "")
+
+	for domain, addresses := range buckets {
+
+		var err error
+		var recs []*net.MX
+		if isIPAddress.MatchString(domain) {
+			recs = append(recs, &net.MX{
+				Host: domain,
+			})
+		}
+		if len(recs) == 0 {
+			recs, _ = net.LookupMX(domain) // TODO: error?
+		}
+
+		slicez.SortBy(recs, func(i, j *net.MX) bool {
+			return i.Pref < j.Pref
+		})
+		var servers = slicez.Map(recs, func(rec *net.MX) string {
+			return rec.Host + ":25"
+		})
+
+		mx = append(mx, TransferList{
+			Domain:    domain,
+			Emails:    addresses,
+			MXServers: servers,
+			Err:       err,
+		})
+
+	}
+	return mx
+
 }

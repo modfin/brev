@@ -6,3 +6,5 @@ dkim-private.*
 dkim-pub.*
 run.sh
 spool-data
+spool-data2
+.env

@@ -23,17 +23,20 @@ type Config struct {
 	Signer *signer.Signer
 }
 
-func New(ctx context.Context, cfg Config, spool *spool.Spool) *Server {
+func New(ctx context.Context, cfg Config, spool *spool.Spool, lc *tools.Logger) *Server {
 
-	logger := logrus.New()
-	logger.AddHook(tools.LoggerWho{Name: "web"})
+	logger := lc.New("web")
 
-	return &Server{
+	ss := &Server{
 		ctx:   ctx,
 		cfg:   cfg,
 		log:   logger,
 		spool: spool,
 	}
+
+	ss.starter()
+
+	return ss
 }
 
 type Server struct {
@@ -49,7 +52,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
-func (s *Server) Start() {
+func (s *Server) starter() {
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.Recoverer)

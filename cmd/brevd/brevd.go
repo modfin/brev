@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/modfin/brev/internal/clix"
+	"github.com/modfin/brev/internal/dnsx"
 	"github.com/modfin/brev/internal/mta"
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/internal/web"
@@ -31,6 +32,10 @@ func main() {
 				Name:   "serve",
 				Action: start,
 				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name: "dev",
+					},
+
 					&cli.StringFlag{
 						Name:    "default-host",
 						EnvVars: []string{"BREV_DEFAULT_HOST"},
@@ -100,6 +105,12 @@ func main() {
 							return nil
 						},
 					},
+
+					&cli.StringFlag{
+						Name:  "dns-resolver",
+						Usage: "ip address (and port) of the dns server/resolver to use for resolving DNS records",
+						Value: "1.1.1.1:53",
+					},
 				},
 			},
 		},
@@ -115,30 +126,38 @@ func start(c *cli.Context) error {
 
 	var cfg = clix.Parse[Config](c)
 
-	fmt.Printf("%+v\n", cfg)
-
 	l := log.New()
-
-	l.AddHook(tools.LoggerWho{Name: "brevd"})
+	l.Formatter = &log.TextFormatter{
+		ForceColors: true,
+	}
+	lc := tools.LoggerCloner(l)
+	l = lc.New("brevd")
 
 	var stopServer func()
 	c.Context, stopServer = context.WithCancel(c.Context)
 	defer stopServer()
 
 	l.Infof("Starting brevd")
+	if cfg.Dev {
+		l.Warn("Running in dev mode")
+	}
 
 	var services []Stoppable
 
-	spool, err := spool.New(cfg.Spool)
+	spool, err := spool.New(cfg.Spool, lc)
 	if err != nil {
 		return err
 	}
-	spool.Start()
 	services = append(services, spool)
 
-	mta := mta.New(cfg.MTA, spool)
-	mta.Start()
+	var dnsxc dnsx.Client
+	dnsxc = dnsx.New(cfg.DNSX, lc)
+	services = append(services, dnsxc)
+	if cfg.Dev {
+		dnsxc = dnsx.NewMock("mailhog:1025")
+	}
 
+	mta := mta.New(cfg.MTA, spool, dnsxc, lc)
 	services = append(services, mta)
 
 	// TODO validate that private key matches up with public key in DNS record provided by domain and selector
@@ -147,9 +166,8 @@ func start(c *cli.Context) error {
 		return fmt.Errorf("could not create signer: %w", err)
 	}
 
-	http := web.New(c.Context, cfg.Web, spool)
-	http.Start()
-	services = append(services, http)
+	websrv := web.New(c.Context, cfg.Web, spool, lc)
+	services = append(services, websrv)
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc,
@@ -195,8 +213,11 @@ type Stoppable interface {
 }
 
 type Config struct {
+	Dev bool `cli:"dev"`
+
 	Web   web.Config
 	Spool spool.Config
 	DKIM  signer.Config
 	MTA   mta.Config
+	DNSX  dnsx.Config
 }

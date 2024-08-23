@@ -1,0 +1,25 @@
+
+volumes:
+  gopkg:
+
+services:
+
+  brevd:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        UID: 1000
+        USER: brev
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/brev
+      - gopkg:/go/pkg
+
+  mailhog:
+    image: mailhog/mailhog
+    ports:
+      - "8025:8025"
+
+

@@ -18,7 +18,7 @@ func setup() (*Spool, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	spool, err := New(Config{Dir: dir})
+	spool, err := New(Config{Dir: dir}, nil)
 	if err != nil {
 		return nil, "", err
 	}

@@ -5,11 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"github.com/alitto/pond"
+	"github.com/modfin/brev/internal/dnsx"
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/tools"
-	"github.com/rs/xid"
+	"github.com/modfin/henry/compare"
+	"github.com/modfin/henry/mapz"
+	"github.com/modfin/henry/slicez"
 	"github.com/sirupsen/logrus"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -17,37 +21,37 @@ type Config struct {
 }
 
 type MTA struct {
-	spooler spool.Spooler
-	log     *logrus.Logger
-	cfg     Config
+	spool queue
+	log   *logrus.Logger
+	cfg   Config
 
 	ostart sync.Once
 	ostop  sync.Once
 
 	pool *pond.WorkerPool
+	dns  dnsx.MXer
 
-	mx *mx
+	router *router
 }
 
-func New(cfg Config, spool spool.Spooler) *MTA {
+type queue interface {
+	Queue() <-chan *spool.Job
+}
 
-	logger := logrus.New()
-	logger.AddHook(tools.LoggerWho{Name: "mta"})
+func New(cfg Config, spool queue, dns dnsx.MXer, lc *tools.Logger) *MTA {
 
-	return &MTA{
-		spooler: spool,
-		cfg:     cfg,
-		log:     logger,
-		mx:      newMX(),
+	logger := lc.New("mta")
+
+	m := &MTA{
+		spool:  spool,
+		cfg:    cfg,
+		log:    logger,
+		dns:    dns,
+		router: newRouter(),
 	}
-}
 
-func (m *MTA) Start() {
-
-	m.ostart.Do(func() {
-		go m.start()
-	})
-
+	go m.start()
+	return m
 }
 
 func (m *MTA) start() {
@@ -55,70 +59,40 @@ func (m *MTA) start() {
 	m.log.Infof("Starting mta, with %d-100 workers", runtime.NumCPU())
 	m.pool = pond.New(100, 0, pond.MinWorkers(runtime.NumCPU()))
 
-	for eid := range m.spooler.Start() {
-		eid := eid
+	for job := range m.spool.Queue() {
 
 		if m.pool.Stopped() {
-			m.log.WithField("eid", eid).Warn("pool stopped, skipping email")
+			m.log.WithField("eid", job.EID).Warn("pool stopped, skipping email")
+			_ = job.Requeue()
 			continue
 		}
-
-		m.pool.Submit(m.send(eid))
+		f := m.send(job)
+		m.pool.Submit(f)
 	}
 	m.pool.StopAndWait()
 }
 
-func (m *MTA) send(eid xid.ID) func() {
+func (m *MTA) send(job *spool.Job) func() {
+
 	return func() {
-		job, in, err := m.spooler.Dequeue(eid)
 
-		// This happens since we travers the filesystem inb the spool. This keeps the memory bound since we do not need to keep track of all emails in memory
-		if errors.Is(err, spool.ErrNotFound) {
-			m.log.WithField("eid", eid).Warn("email not found, skipping, (concurrent dequeue might happen with dir traversals)")
-			return
-		}
-
+		groups, err := m.groupEmails(job.Rcpt)
 		if err != nil {
-			m.spooler.Logf(eid, "could not dequeue email %s, err: %v", eid.String(), err)
-			err = m.spooler.Fail(eid)
-			return
-		}
-		defer in.Close()
-
-		groups, err := m.mx.GroupEmails(job.Rcpt)
-		if err != nil {
-			m.spooler.Logf(eid, "could not group all emails %s, err: %v", eid.String(), err)
-			m.spooler.Fail(eid)
+			_ = job.Logf("could not group all emails %s, err: %w", job.EID.String(), err)
+			_ = job.Fail()
 			return
 		}
 		if len(groups) == 0 {
-			m.spooler.Logf(eid, "no servers to send email to for %s", eid.String())
-			m.spooler.Fail(eid)
+			_ = job.Logf("no servers to send email to for %s", job.EID.String())
+			_ = job.Fail()
 			return
 		}
 
-		for i, group := range groups {
-
-			domain, _ := tools.DomainOfEmail(group.Emails[0])
-			mx := group.Servers[0]
-			err = m.spooler.Logf(eid, "sending email to domain %s, through %s", domain, mx)
-			if err != nil {
-				m.log.WithError(err).Error("could not log email %s, err: %w", eid, err)
-			}
-			in := in
-			if i > 0 {
-				in, err = in.Clone()
-				if err != nil {
-					m.log.WithError(err).Error("could not clone email stream %s, err: %w", eid, err)
-				}
-			}
-
-			// TODO smtp route email
-			fmt.Println(domain, group.Servers)
-
+		for _, group := range groups {
+			m.router.Route(job, group)
 		}
 
-		m.spooler.Succeed(eid)
+		_ = job.Success()
 
 	}
 }
@@ -136,4 +110,42 @@ func (m *MTA) Stop(ctx context.Context) error {
 
 	})
 	return err
+}
+
+type group struct {
+	Emails  []string
+	Servers []string
+}
+
+func (m *MTA) groupEmails(emails []string) ([]*group, error) {
+	emails = slicez.Map(emails, strings.ToLower)
+
+	var buckets = slicez.GroupBy(emails, func(email string) string {
+		domain, err := tools.DomainOfEmail(email)
+		if err != nil {
+			return ""
+		}
+		return domain
+	})
+	delete(buckets, "")
+
+	var err error
+
+	groups := mapz.Slice(buckets, func(domain string, addresses []string) *group {
+		recs, lerr := m.dns.MX(domain)
+		if lerr != nil {
+			err = errors.Join(err, fmt.Errorf("could not find mx for domain %s, err: %w", domain, lerr))
+			return nil
+		}
+		return &group{
+			Emails:  addresses,
+			Servers: recs,
+		}
+	})
+
+	groups = slicez.Reject(groups, compare.IsZero[*group]())
+	groups = slicez.Reject(groups, func(a *group) bool {
+		return len(a.Servers) == 0 || len(a.Emails) == 0
+	})
+	return groups, err
 }

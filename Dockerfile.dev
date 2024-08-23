@@ -1,0 +1,20 @@
+FROM golang:1.23-alpine3.20 AS builder
+RUN apk add --no-cache build-base
+
+
+RUN go install github.com/codeskyblue/fswatch@latest
+
+ARG UID
+ARG USER
+
+RUN if test "$USER" != 'root'; then adduser --disabled-password --uid "$UID" "$USER"; fi
+RUN chown -R ${UID} /go/pkg
+RUN chmod -R +w /go/pkg
+
+
+EXPOSE 8080
+WORKDIR /brev
+
+CMD fswatch --config ./fsw.yml
+
+
