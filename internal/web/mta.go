@@ -8,6 +8,7 @@ import (
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/smtpx/envelope"
 	"github.com/modfin/henry/compare"
+	"github.com/modfin/henry/mapz"
 	"github.com/modfin/henry/slicez"
 	"github.com/rs/xid"
 	"net/http"
@@ -69,16 +70,13 @@ func mta(s *Server) http.HandlerFunc {
 		//Overwriting Message-ID
 		email.Headers.Set("Message-ID", []string{messageId})
 
-		email.Metadata.Id = eid
-		email.Metadata.ReturnPath = fmt.Sprintf("bounce-%s", messageId)
-
-		if email.Metadata.Conversation && !email.Headers.Has("Reply-To") {
-			replyto := brev.Address{
-				Name:  email.From.Name,
-				Email: fmt.Sprintf("conv-%s-%s@%s", eid.String(), strings.ReplaceAll(email.From.Email, "@", "="), host),
-			}
-			email.Headers.Set("Reply-To", []string{replyto.String()})
-		}
+		//if email.Metadata.Conversation && !email.Headers.Has("Reply-To") {
+		//	replyto := brev.Address{
+		//		Name:  email.From.Name,
+		//		Email: fmt.Sprintf("conv-%s-%s@%s", eid.String(), strings.ReplaceAll(email.From.Email, "@", "="), host),
+		//	}
+		//	email.Headers.Set("Reply-To", []string{replyto.String()})
+		//}
 
 		emlreader, err := envelope.Marshal(email, s.cfg.Signer)
 		if err != nil {
@@ -87,22 +85,33 @@ func mta(s *Server) http.HandlerFunc {
 
 		}
 
-		job := spool.Job{
-			EID:       email.Metadata.Id,
-			MessageId: messageId,
-			From:      email.Metadata.ReturnPath,
-			Rcpt:      email.Recipients(),
+		recp := email.Recipients()
+		groups := slicez.GroupBy(recp, func(s string) string {
+			return slicez.Nth(strings.Split(s, "@"), -1)
+		})
 
-			LocalName: s.cfg.DefaultHost,
-		}
-		err = s.spool.Enqueue(job, emlreader) // todo add signer.
+		var i int
+		jobs := slicez.Map(mapz.Values(groups), func(emails []string) spool.Job {
+			defer func() { i += 1 }()
+			tid := fmt.Sprintf("%s-%d", eid.String(), i)
+			return spool.Job{
+				TID:       tid,
+				EID:       eid,
+				MessageId: messageId,
+				From:      fmt.Sprintf("bounce-%s@%s", tid, host),
+				Rcpt:      emails,
+				LocalName: s.cfg.DefaultHost, // TODO get local name from request...
+			}
+		})
+
+		err = s.spool.Enqueue(jobs, emlreader) // todo add signer.
 		if err != nil {
 			respond(w, http.StatusInternalServerError, "could not enqueue email")
 			return
 		}
 
 		w.WriteHeader(200)
-		_ = json.NewEncoder(w).Encode(job)
+		_ = json.NewEncoder(w).Encode(jobs)
 	}
 }
 

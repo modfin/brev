@@ -13,18 +13,19 @@ func newRouter() *router {
 type router struct {
 }
 
-func (r *router) Route(job *spool.Job, g *group) error {
+func (r *router) Route(job *spool.Job, serv []string) error {
 
-	if g == nil || len(g.Servers) == 0 {
+	if len(serv) == 0 {
 		return fmt.Errorf("no servers to send email to")
 	}
 
-	conn, err := smtpx.NewConnection(job, g.Servers[0], job.LocalName, nil)
+	conn, err := smtpx.NewConnection(job, serv[0], job.LocalName, nil)
 	if err != nil {
 		return fmt.Errorf("could not connect to server: %w", err)
 	}
 
-	err = conn.SendMail(job.From, g.Emails, job)
+	err = conn.SendMail(job.From, job.Rcpt, job)
+
 	if err != nil {
 		return fmt.Errorf("could not send email: %w", err)
 	}

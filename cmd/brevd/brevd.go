@@ -130,7 +130,13 @@ func start(c *cli.Context) error {
 	l.Formatter = &log.TextFormatter{
 		ForceColors: true,
 	}
+
+	if cfg.Dev {
+		l.SetLevel(log.DebugLevel)
+	}
+
 	lc := tools.LoggerCloner(l)
+
 	l = lc.New("brevd")
 
 	var stopServer func()

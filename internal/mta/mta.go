@@ -9,7 +9,6 @@ import (
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/compare"
-	"github.com/modfin/henry/mapz"
 	"github.com/modfin/henry/slicez"
 	"github.com/sirupsen/logrus"
 	"runtime"
@@ -66,8 +65,10 @@ func (m *MTA) start() {
 			_ = job.Requeue()
 			continue
 		}
+
 		f := m.send(job)
 		m.pool.Submit(f)
+		m.log.WithField("tid", job.TID).Debug("email submitted to mta")
 	}
 	m.pool.StopAndWait()
 }
@@ -76,23 +77,32 @@ func (m *MTA) send(job *spool.Job) func() {
 
 	return func() {
 
-		groups, err := m.groupEmails(job.Rcpt)
+		mxs, err := m.mxsOf(job.Rcpt)
 		if err != nil {
-			_ = job.Logf("could not group all emails %s, err: %w", job.EID.String(), err)
-			_ = job.Fail()
-			return
-		}
-		if len(groups) == 0 {
-			_ = job.Logf("no servers to send email to for %s", job.EID.String())
+			m.log.WithError(err).WithField("tid", job.TID).Error("could not find mx servers for emails")
+
+			_ = job.Logf("could not find mx servers for emails %s, err: %w", job.TID, err)
 			_ = job.Fail()
 			return
 		}
 
-		for _, group := range groups {
-			m.router.Route(job, group)
+		m.log.WithField("tid", job.TID).Debugf("submitting email to smtp mta router")
+		err = m.router.Route(job, mxs)
+		if err != nil {
+			m.log.WithError(err).WithField("tid", job.TID).Error("could not route email")
+			_ = job.Logf("could not route email %s, err: %w", job.TID, err)
+			_ = job.Fail()
+			return
 		}
 
-		_ = job.Success()
+		m.log.WithField("tid", job.TID).Debugf("email has been sent")
+
+		err = job.Success()
+		if err != nil {
+			_ = job.Logf("could not mark email %s as sent, err: %w", job.TID, err)
+			m.log.WithError(err).WithField("tid", job.TID).Error("could not mark email as successful")
+
+		}
 
 	}
 }
@@ -112,40 +122,41 @@ func (m *MTA) Stop(ctx context.Context) error {
 	return err
 }
 
-type group struct {
-	Emails  []string
-	Servers []string
-}
+func (m *MTA) mxsOf(emails []string) ([]string, error) {
 
-func (m *MTA) groupEmails(emails []string) ([]*group, error) {
+	var err error
+
 	emails = slicez.Map(emails, strings.ToLower)
 
-	var buckets = slicez.GroupBy(emails, func(email string) string {
+	var domains = slicez.Reject(slicez.Map(emails, func(email string) string {
 		domain, err := tools.DomainOfEmail(email)
 		if err != nil {
 			return ""
 		}
 		return domain
-	})
-	delete(buckets, "")
+	}), compare.IsZero[string]())
 
-	var err error
+	if len(domains) == 0 {
+		return nil, errors.New("no domains found")
+	}
 
-	groups := mapz.Slice(buckets, func(domain string, addresses []string) *group {
-		recs, lerr := m.dns.MX(domain)
-		if lerr != nil {
-			err = errors.Join(err, fmt.Errorf("could not find mx for domain %s, err: %w", domain, lerr))
-			return nil
-		}
-		return &group{
-			Emails:  addresses,
-			Servers: recs,
-		}
-	})
+	domains = slicez.Uniq(domains)
 
-	groups = slicez.Reject(groups, compare.IsZero[*group]())
-	groups = slicez.Reject(groups, func(a *group) bool {
-		return len(a.Servers) == 0 || len(a.Emails) == 0
-	})
-	return groups, err
+	if len(domains) > 1 {
+		return nil, errors.New("only one domain is allowed")
+	}
+
+	domain := domains[0]
+
+	m.log.WithField("domain", domain).Debug("mx lookup for domain")
+	mxs, err := m.dns.MX(domain)
+	if err != nil {
+		return nil, errors.Join(err, fmt.Errorf("could not find mx for domain %s, err: %w", domain, err))
+	}
+
+	if len(mxs) == 0 {
+		return nil, errors.New("no mx records found")
+	}
+
+	return mxs, err
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
-	"github.com/rs/xid"
 	"net/mail"
 	"strings"
 )
@@ -64,15 +63,7 @@ func (h Headers) Delete(key string) []string {
 
 }
 
-type Metadata struct {
-	Conversation bool   `json:"conversation"`
-	ReturnPath   string `json:"return_path"`
-	Id           xid.ID `json:"id"`
-}
-
 type Email struct {
-	Metadata Metadata
-
 	Headers Headers    `json:"headers"`
 	From    *Address   `json:"from"`
 	To      []*Address `json:"to"`
@@ -104,9 +95,6 @@ func (e *Email) Reply() *Email {
 	headers.Add("References", e.Headers.GetFirst("Message-ID"))
 
 	return &Email{
-		Metadata: Metadata{
-			Conversation: true,
-		},
 		Headers: headers,
 		To:      to,
 		Subject: compare.Ternary(strings.HasPrefix(e.Subject, "Re: "), e.Subject, fmt.Sprintf("Re: %s", e.Subject)),

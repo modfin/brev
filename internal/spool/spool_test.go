@@ -101,8 +101,8 @@ func TestEnqueueCreatesDirectoriesAndFiles(t *testing.T) {
 		t.Fatalf("Enqueue failed: %v", err)
 	}
 
-	canonicalDir := eid2dir(spool.cfg.Dir, canonical, email.EID)
-	queueDir := eid2dir(spool.cfg.Dir, queue, email.EID)
+	canonicalDir := tid2dir(spool.cfg.Dir, canonical, email.EID)
+	queueDir := tid2dir(spool.cfg.Dir, queue, email.EID)
 
 	if !fileExists(filepath.Join(canonicalDir, fmt.Sprintf("%s.eml", email.EID))) {
 		t.Fatalf("Expected email file to be created in canonical directory")
@@ -135,7 +135,7 @@ func TestDequeueMovesJobToProcessing(t *testing.T) {
 	}
 	defer eml.Close()
 
-	procDir := eid2dir(spool.cfg.Dir, processing, email.EID)
+	procDir := tid2dir(spool.cfg.Dir, processing, email.EID)
 	if !fileExists(filepath.Join(procDir, fmt.Sprintf("%s.job", email.EID))) {
 		t.Fatalf("Expected job file to be moved to processing directory")
 	}
@@ -168,7 +168,7 @@ func TestSucceedMovesJobToSent(t *testing.T) {
 		t.Fatalf("Succeed failed: %v", err)
 	}
 
-	sentDir := eid2dir(spool.cfg.Dir, sent, email.EID)
+	sentDir := tid2dir(spool.cfg.Dir, sent, email.EID)
 	if !fileExists(filepath.Join(sentDir, fmt.Sprintf("%s.job", email.EID))) {
 		t.Fatalf("Expected job file to be moved to sent directory")
 	}
@@ -201,7 +201,7 @@ func TestFailMovesJobToFailed(t *testing.T) {
 		t.Fatalf("Fail failed: %v", err)
 	}
 
-	failDir := eid2dir(spool.cfg.Dir, failed, email.EID)
+	failDir := tid2dir(spool.cfg.Dir, failed, email.EID)
 	if !fileExists(filepath.Join(failDir, fmt.Sprintf("%s.job", email.EID))) {
 		t.Fatalf("Expected job file to be moved to failed directory")
 	}
@@ -220,7 +220,7 @@ func TestLogfCreatesLogFile(t *testing.T) {
 		t.Fatalf("Logf failed: %v", err)
 	}
 
-	logDir := eid2dir(spool.cfg.Dir, log, eid)
+	logDir := tid2dir(spool.cfg.Dir, log, eid)
 	if !fileExists(filepath.Join(logDir, fmt.Sprintf("%s.log", eid.String()))) {
 		t.Fatalf("Expected log file to be created")
 	}
