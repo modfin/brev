@@ -66,6 +66,7 @@ func (m *MTA) start() {
 			continue
 		}
 
+		_ = job.Logf("[mta] submitting job to pool, %s", job.TID)
 		f := m.send(job)
 		m.pool.Submit(f)
 		m.log.WithField("tid", job.TID).Debug("email submitted to mta")
@@ -76,21 +77,24 @@ func (m *MTA) start() {
 func (m *MTA) send(job *spool.Job) func() {
 
 	return func() {
+		_ = job.Logf("[mta] starting job")
 
 		mxs, err := m.mxsOf(job.Rcpt)
 		if err != nil {
 			m.log.WithError(err).WithField("tid", job.TID).Error("could not find mx servers for emails")
 
-			_ = job.Logf("could not find mx servers for emails %s, err: %w", job.TID, err)
+			_ = job.Logf("[mta error] could not find mx servers for emails %s, err: %w", job.TID, err)
 			_ = job.Fail()
 			return
 		}
 
+		_ = job.Logf("[mta] submitting to router with mx servers [%s]", strings.Join(mxs, " "))
 		m.log.WithField("tid", job.TID).Debugf("submitting email to smtp mta router")
+
 		err = m.router.Route(job, mxs)
 		if err != nil {
 			m.log.WithError(err).WithField("tid", job.TID).Error("could not route email")
-			_ = job.Logf("could not route email %s, err: %w", job.TID, err)
+			_ = job.Logf("[mta error] could not route email %s, err: %w", job.TID, err)
 			_ = job.Fail()
 			return
 		}
@@ -99,10 +103,11 @@ func (m *MTA) send(job *spool.Job) func() {
 
 		err = job.Success()
 		if err != nil {
-			_ = job.Logf("could not mark email %s as sent, err: %w", job.TID, err)
+			_ = job.Logf("[mta error] could not mark email %s as sent, err: %w", job.TID, err)
 			m.log.WithError(err).WithField("tid", job.TID).Error("could not mark email as successful")
 
 		}
+		_ = job.Logf("[mta] done")
 
 	}
 }

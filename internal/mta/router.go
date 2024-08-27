@@ -25,10 +25,10 @@ func (r *router) Route(job *spool.Job, serv []string) error {
 	}
 
 	err = conn.SendMail(job.From, job.Rcpt, job)
-
 	if err != nil {
 		return fmt.Errorf("could not send email: %w", err)
 	}
+	conn.Close()
 
 	return nil
 }

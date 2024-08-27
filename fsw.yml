@@ -9,7 +9,7 @@ triggers:
       cd /brev && go run ./cmd/brevd/brevd.go  serve \
         --default-host=mx0.example.com \
         --http-interface="0.0.0.0" \
-        --spool-dir=./spool-data2 \
+        --spool-dir=./spool-data \
         --dkim-domain=example.com \
         --dkim-selector=brev \
         --dkim-key-file=./dkim-test-key/dkim-private.pem \

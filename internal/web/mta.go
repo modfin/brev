@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"github.com/modfin/brev"
 	"github.com/modfin/brev/internal/spool"
+	"github.com/modfin/brev/pkg/zid"
 	"github.com/modfin/brev/smtpx/envelope"
+	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/mapz"
 	"github.com/modfin/henry/slicez"
-	"github.com/rs/xid"
 	"net/http"
 	"strings"
 	"time"
@@ -61,25 +62,27 @@ func mta(s *Server) http.HandlerFunc {
 			email.Headers = brev.Headers{}
 		}
 
-		// Overwriting Date
-		email.Headers.Set("Date", []string{time.Now().In(time.UTC).Format(time.RFC1123Z)})
-
-		eid := xid.New()
+		eid := zid.New()
 		host = compare.Coalesce(host, s.cfg.DefaultHost)
-		messageId := fmt.Sprintf("%s@%s", eid.String(), host)
-		//Overwriting Message-ID
-		email.Headers.Set("Message-ID", []string{messageId})
 
-		//if email.Metadata.Conversation && !email.Headers.Has("Reply-To") {
-		//	replyto := brev.Address{
-		//		Name:  email.From.Name,
-		//		Email: fmt.Sprintf("conv-%s-%s@%s", eid.String(), strings.ReplaceAll(email.From.Email, "@", "="), host),
-		//	}
-		//	email.Headers.Set("Reply-To", []string{replyto.String()})
-		//}
+		escapedFrom := strings.ReplaceAll(email.From.Email, "@", "=")
+		// Overwriting Date
+		//TODO check if date is already set, and if so, do not overwrite.
+
+		date := email.Headers.GetFirst("Date")
+		if !tools.ValidDate(date) {
+			email.Headers.Set("Date", []string{time.Now().Format(time.RFC1123Z)})
+		}
+
+		messageId := email.Headers.GetFirst("Message-ID") // TODO check domain of message id if provided.
+		if !tools.ValidateMessageID(messageId) {
+			messageId = fmt.Sprintf("<%s+%s@%s", eid, escapedFrom, host)
+			email.Headers.Set("Message-ID", []string{messageId})
+		}
 
 		emlreader, err := envelope.Marshal(email, s.cfg.Signer)
 		if err != nil {
+			s.log.WithError(err).Error("could not marshal email")
 			respond(w, http.StatusInternalServerError, "could not marshal email")
 			return
 
@@ -93,12 +96,11 @@ func mta(s *Server) http.HandlerFunc {
 		var i int
 		jobs := slicez.Map(mapz.Values(groups), func(emails []string) spool.Job {
 			defer func() { i += 1 }()
-			tid := fmt.Sprintf("%s-%d", eid.String(), i)
+			tid := eid.ToTID(i)
 			return spool.Job{
 				TID:       tid,
 				EID:       eid,
-				MessageId: messageId,
-				From:      fmt.Sprintf("bounce-%s@%s", tid, host),
+				From:      fmt.Sprintf("bounce+%s+%s@%s", tid, escapedFrom, host),
 				Rcpt:      emails,
 				LocalName: s.cfg.DefaultHost, // TODO get local name from request...
 			}

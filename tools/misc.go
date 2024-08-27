@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/modfin/henry/slicez"
 	"math/rand"
+	"net/mail"
 	"os"
 	"os/user"
 	"strings"
@@ -40,4 +41,22 @@ func RandStringRunes(n int) string {
 		b[i] = letterRunes[rand.Intn(len(letterRunes))]
 	}
 	return string(b)
+}
+
+func ValidateMessageID(messageID string) bool {
+	if len(messageID) == 0 {
+		return false
+	}
+	// The mail.ParseAddress function parses an email address or a message ID.
+	// It returns an error if the input does not conform to the expected format.
+	_, err := mail.ParseAddress(messageID)
+	return err == nil
+}
+
+func ValidDate(date string) bool {
+	if date == "" {
+		return false
+	}
+	_, err := mail.ParseDate(date)
+	return err == nil
 }

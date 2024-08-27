@@ -11,6 +11,7 @@ RUN if test "$USER" != 'root'; then adduser --disabled-password --uid "$UID" "$U
 RUN chown -R ${UID} /go/pkg
 RUN chmod -R +w /go/pkg
 
+USER ${UID}
 
 EXPOSE 8080
 WORKDIR /brev

@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/modfin/brev/pkg/zid"
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
-	"github.com/rs/xid"
 	"github.com/sirupsen/logrus"
 	"io"
 	"io/fs"
@@ -47,11 +47,10 @@ type Spooler interface {
 }
 
 type Job struct {
-	TID       string   `json:"tid"`
-	EID       xid.ID   `json:"eid"`
-	MessageId string   `json:"message_id"`
-	From      string   `json:"from"`
-	Rcpt      []string `json:"rcpt"`
+	TID  string   `json:"tid"`
+	EID  zid.ID   `json:"eid"`
+	From string   `json:"from"`
+	Rcpt []string `json:"rcpt"`
 
 	LocalName string `json:"local_name"`
 
@@ -311,7 +310,8 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 			return errors.Join(err, undo())
 		}
 		s.log.WithField("tid", job.TID).Debugf("enqueue; email had been enqueued")
-		_ = s.Logf(job.TID, "email has been written to disk and enqueued")
+		_ = s.Logf(job.TID, "[spool] email has been written to disk and enqueued")
+		_ = s.Logf(job.TID, "[spool] rcpt [%s]", strings.Join(job.Rcpt, " "))
 
 	}
 	s.sigEnqueue()
@@ -394,7 +394,7 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 
 	if !fileExists(filepath.Join(queuedir, jobFilename)) {
 		err = fmt.Errorf("could not find job file in queue dir, %s, err: %w", filepath.Join(queuedir, jobFilename), ErrNotFound)
-		_ = s.Logf(tid, "faild to dequeue email: %s", err.Error())
+		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not find job file in queue dir")
 		return nil, err
 	}
@@ -402,14 +402,14 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	err = os.MkdirAll(procdir, 0755)
 	if err != nil {
 		err = fmt.Errorf("could not create processing directory: %w", err)
-		_ = s.Logf(tid, "faild to dequeue email: %s", err.Error())
+		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not create processing directory")
 		return nil, err
 	}
 	err = os.Rename(filepath.Join(queuedir, jobFilename), filepath.Join(procdir, jobFilename))
 	if err != nil {
 		err = fmt.Errorf("could not rename job file: %w", err)
-		_ = s.Logf(tid, "faild to dequeue email: %s", err.Error())
+		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not rename job file")
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	data, err := os.ReadFile(filepath.Join(procdir, jobFilename))
 	if err != nil {
 		err = fmt.Errorf("could not read job file: %w", err)
-		_ = s.Logf(tid, "faild to dequeue email: %s", err.Error())
+		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not read job file")
 		return nil, err
 	}
@@ -427,7 +427,7 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	err = json.Unmarshal(data, &job)
 	if err != nil {
 		err = fmt.Errorf("could not unmarshal job, %w", err)
-		_ = s.Logf(tid, "faild to dequeue email: %s", err.Error())
+		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not unmarshal job")
 		return nil, err
 	}
@@ -436,13 +436,13 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	job.emlPath = filepath.Join(emldir, fmt.Sprintf("%s.eml", eid))
 	if !fileExists(job.emlPath) {
 		err = fmt.Errorf("email file, %s, does not exist", job.emlPath)
-		_ = s.Logf(tid, "faild to dequeue email: %s", err.Error())
+		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; email file does not exist")
 		return nil, err
 	}
 
-	_ = s.Logf(tid, "email had been deququed for processing")
-	s.log.WithField("tid", job.TID).Debugf("dequeue; email had been deququed")
+	_ = s.Logf(tid, "[spool] email had been dequeued for processing")
+	s.log.WithField("tid", job.TID).Debugf("dequeue; email had been dequeued")
 	return &job, nil
 }
 
@@ -473,7 +473,7 @@ func (s *Spool) Succeed(tid string) error {
 		return fmt.Errorf("could not move job file to sent: %w", err)
 	}
 
-	_ = s.Logf(tid, "email had been successfully sent")
+	_ = s.Logf(tid, "[spool] email had been successfully sent")
 	s.log.WithField("tid", tid).Debugf("succeed; email had been marked sent")
 
 	return nil
@@ -506,7 +506,7 @@ func (s *Spool) Fail(tid string) error {
 		return fmt.Errorf("could not move job file to sent: %w", err)
 	}
 
-	_ = s.Logf(tid, "email has failed to send")
+	_ = s.Logf(tid, "[spool] email has failed to send")
 	s.log.WithField("tid", tid).Debugf("succeed; email had been marked failed")
 
 	return nil
@@ -545,7 +545,7 @@ func (s *Spool) Requeue(tid string) error {
 		return fmt.Errorf("could not move job file from %s to queu: %w", status, err)
 	}
 
-	_ = s.Logf(tid, "email has been requeued, moved from '%s' to 'queue'", status)
+	_ = s.Logf(tid, "[spool] email has been requeued, moved from '%s' to 'queue'", status)
 	s.log.WithField("tid", tid).Debugf("succeed; email had been requeued")
 
 	return nil
@@ -574,20 +574,15 @@ func tid2name(tid string) string {
 	return fmt.Sprintf("%s.job", tid)
 }
 
-func tid2eid(tid string) (xid.ID, error) {
-	eid, _, _ := strings.Cut(tid, "-")
-	return xid.FromString(eid)
-}
-
-func tid2dir(prefix string, catalog string, tid string) (string, error) {
-	eid, err := tid2eid(tid)
+func tid2eid(tid string) (zid.ID, error) {
+	eid, _, err := zid.FromTID(tid)
 	if err != nil {
-		return "", fmt.Errorf("could not parse xid: %w", err)
+		return zid.ID{}, fmt.Errorf("could not parse xid from tid: %w", err)
 	}
-	return eid2dir(prefix, catalog, eid), nil
+	return eid, nil
 }
 
-func eid2dir(prefix string, catalog string, eid xid.ID) string {
+func eid2dir(prefix string, catalog string, eid zid.ID) string {
 	t := eid.Time()
 	day := t.In(time.UTC).Format("2006-01-02")
 	hour := t.In(time.UTC).Format("15")

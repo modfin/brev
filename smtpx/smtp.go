@@ -58,16 +58,21 @@ func NewClient(logger Logger, conn net.Conn, host string, localName string) (*Cl
 		return nil, err
 	}
 
-	if logger != nil {
-		logger.Logf("[smtp] <- %d: %s", code, msg)
-	}
-
 	if localName == "" {
 		localName = "localhost"
 	}
-	c := &Client{Text: text, conn: conn, serverName: host, localName: localName}
+	c := &Client{Text: text, conn: conn, serverName: host, localName: localName, logger: logger}
 	_, c.tls = conn.(*tls.Conn)
+
+	c.logf("[smtp] <- %d: %s", code, msg)
+
 	return c, nil
+}
+
+func (c *Client) logf(format string, args ...interface{}) {
+	if c.logger != nil {
+		c.logger.Logf(format, args...)
+	}
 }
 
 // SetLogger Sets logger for smtp communication
@@ -110,9 +115,8 @@ func (c *Client) Hello(localName string) error {
 
 // cmd is a convenience function that sends a command and returns the response
 func (c *Client) cmd(expectCode int, format string, args ...interface{}) (int, string, error) {
-	if c.logger != nil {
-		c.logger.Logf("[smtp] -> "+format, args...)
-	}
+
+	c.logf("[smtp] -> "+format, args...)
 
 	id, err := c.Text.Cmd(format, args...)
 	if err != nil {
@@ -121,9 +125,9 @@ func (c *Client) cmd(expectCode int, format string, args ...interface{}) (int, s
 	c.Text.StartResponse(id)
 	defer c.Text.EndResponse(id)
 	code, msg, err := c.Text.ReadResponse(expectCode)
-	if c.logger != nil {
-		c.logger.Logf("[smtp] <- %d: %s", code, msg)
-	}
+
+	c.logf("[smtp] <- %d: %s", code, msg)
+
 	return code, msg, err
 }
 
@@ -290,9 +294,9 @@ type dataCloser struct {
 func (d *dataCloser) Close() error {
 	d.WriteCloser.Close()
 	code, msg, err := d.c.Text.ReadResponse(250)
-	if d.c.logger != nil {
-		d.c.logger.Logf("[smtp] <- %d: %s", code, msg)
-	}
+
+	d.c.logf("[smtp] <- %d: %s", code, msg)
+
 	return err
 }
 
@@ -382,9 +386,9 @@ func SendMail(logger Logger, addr string, localName string, a Auth, from string,
 		return err
 	}
 	err = w.Close()
-	if logger != nil {
-		logger.Logf("[smtp] -> {... %d bytes written}", i)
-	}
+
+	c.logf("[smtp] -> {... %d bytes written}", i)
+
 	if err != nil {
 		return err
 	}
@@ -392,7 +396,7 @@ func SendMail(logger Logger, addr string, localName string, a Auth, from string,
 }
 
 type Connection interface {
-	SendMail(from string, to []string, msg io.WriterTo) error
+	SendMail(returnPath string, to []string, msg io.WriterTo) error
 	Close() error
 	SetLogger(logger Logger)
 }
@@ -438,8 +442,8 @@ func NewConnection(logger Logger, addr string, localName string, a Auth) (Connec
 	return c, nil
 }
 
-func (c *connection) SendMail(from string, to []string, msg io.WriterTo) (err error) {
-	if err = validateLine(from); err != nil {
+func (c *connection) SendMail(returnPath string, to []string, msg io.WriterTo) (err error) {
+	if err = validateLine(returnPath); err != nil {
 		return err
 	}
 
@@ -451,7 +455,7 @@ func (c *connection) SendMail(from string, to []string, msg io.WriterTo) (err er
 			return err
 		}
 	}
-	if err = c.client.Mail(from); err != nil {
+	if err = c.client.Mail(returnPath); err != nil {
 		_ = c.client.Reset()
 		return err
 	}
@@ -484,9 +488,9 @@ func (c *connection) SendMail(from string, to []string, msg io.WriterTo) (err er
 		_ = c.client.Reset()
 		return err
 	}
-	if c.client.logger != nil {
-		c.client.logger.Logf("[smtp] -> {written %d bytes}", i)
-	}
+
+	c.client.logf("[smtp] -> {written %d bytes}", i)
+
 	err = w.Close()
 	if err != nil {
 		_ = c.client.Reset()
