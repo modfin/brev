@@ -33,6 +33,8 @@ const sent string = "sent"
 const failed string = "failed"
 const retry string = "retry"
 
+var statuses = []string{queue, processing, sent, failed, retry}
+
 // TODO replace with a interface of an FS enabling the use of eg s3 and gcs instead of local disk
 
 type Spooler interface {
@@ -51,6 +53,9 @@ type Job struct {
 	EID  zid.ID   `json:"eid"`
 	From string   `json:"from"`
 	Rcpt []string `json:"rcpt"`
+
+	Try       int       `json:"try"`
+	NotBefore time.Time `json:"not-before"`
 
 	LocalName string `json:"local_name"`
 
@@ -111,6 +116,22 @@ func (j *Job) WriteTo(w io.Writer) (n int64, err error) {
 func (j *Job) Logf(format string, args ...any) error {
 	return j.spool.Logf(j.TID, format, args...)
 }
+func (j *Job) Retry() error {
+	if j.spool == nil {
+		return fmt.Errorf("job has not been initialized and has no reference to spool")
+	}
+
+	if j.NotBefore.IsZero() {
+		return errors.New("job has no retry time")
+	}
+
+	err := j.spool.UpdateJob(j)
+	if err != nil {
+		return fmt.Errorf("could not update job: %w", err)
+	}
+
+	return j.spool.Retry(j.TID)
+}
 
 func New(config Config, lc *tools.Logger) (*Spool, error) {
 
@@ -161,6 +182,7 @@ func (s *Spool) start() {
 
 		s.sigEnqueue()
 		go s.startProducer()
+		go s.startRetryer()
 
 	})
 }
@@ -187,6 +209,7 @@ func (s *Spool) sigEnqueue() {
 func (s *Spool) startProducer() {
 	dir := filepath.Join(s.cfg.Dir, queue)
 
+	s.log.Debug("walker; starting")
 	for {
 
 		<-s.sig // Should contain stuff if there is something waiting or to be checked if waiting
@@ -212,6 +235,59 @@ func (s *Spool) startProducer() {
 			}
 			s.log.WithField("tid", tid).Debug("walker; writing job to spool consumer")
 			s.queue <- job // Blocking until the job is consumed
+
+			return nil
+		})
+
+	}
+}
+
+func (s *Spool) startRetryer() {
+	dir := filepath.Join(s.cfg.Dir, retry)
+	s.log.Debug("retry walker; starting")
+	for {
+
+		<-time.After(time.Minute) // Should contain stuff if there is something waiting or to be checked if waiting
+		s.log.Debug("retry walker; start walking retry dir")
+		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if filepath.Ext(path) != ".job" {
+				return nil
+			}
+			base := filepath.Base(path)
+			tid := strings.TrimSuffix(base, ".job")
+			// TODO rexexp check for tid
+			if err != nil {
+				s.log.WithError(err).Errorf("could not parse xid from %s", path)
+				return err
+			}
+
+			// TODO keep track of recently enqueued emails to avoid re-enqueuing or refactor to dequeue and not just send the reference
+			s.log.WithField("tid", tid).Debug("retry walker; checking job")
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				err = fmt.Errorf("could not read job file: %w", err)
+				_ = s.Logf(tid, "[spool error] faild read retry email: %s", err.Error())
+				s.log.WithError(err).WithField("tid", tid).Error("retry failed; could not read job file")
+				return nil
+			}
+			job := &Job{}
+			err = json.Unmarshal(data, &job)
+			if err != nil {
+				err = fmt.Errorf("could not unmarshal job, %w", err)
+				_ = s.Logf(tid, "[spool error] faild to retry email: %s", err.Error())
+				s.log.WithError(err).WithField("tid", tid).Error("retry failed; could not unmarshal job")
+				return nil
+			}
+
+			if time.Now().After(job.NotBefore) {
+				s.log.WithField("tid", tid).Debug("retry walker; requeueing job")
+				err = s.Requeue(tid)
+				if err != nil {
+					_ = s.Logf(tid, "[spool error] faild to retry email: %s", err.Error())
+					s.log.WithError(err).WithField("tid", tid).Error("retry failed; could not requeue job")
+				}
+			}
 
 			return nil
 		})
@@ -507,7 +583,7 @@ func (s *Spool) Fail(tid string) error {
 	}
 
 	_ = s.Logf(tid, "[spool] email has failed to send")
-	s.log.WithField("tid", tid).Debugf("succeed; email had been marked failed")
+	s.log.WithField("tid", tid).Debugf("fail; email had been marked failed")
 
 	return nil
 }
@@ -520,17 +596,9 @@ func (s *Spool) Requeue(tid string) error {
 	s.mu.Lock(eid.String())
 	defer s.mu.Unlock(eid.String())
 
-	var status string
-	for _, dir := range []string{queue, processing, sent, failed} {
-		dirpath := eid2dir(s.cfg.Dir, dir, eid)
-		path := filepath.Join(dirpath, tid2name(tid))
-		if fileExists(path) {
-			status = dir
-			break
-		}
-	}
-	if status == "" {
-		return fmt.Errorf("could not find any reference to job %s", eid.String())
+	status, err := s.status(tid)
+	if err != nil {
+		return fmt.Errorf("could not find any reference to job %s, %w", eid.String(), err)
 	}
 	if status == queue {
 		return fmt.Errorf("job %s is already in queue", eid.String())
@@ -539,6 +607,11 @@ func (s *Spool) Requeue(tid string) error {
 	from := eid2dir(s.cfg.Dir, status, eid)
 	to := eid2dir(s.cfg.Dir, queue, eid)
 	jobFilename := tid2name(tid)
+
+	err = os.MkdirAll(to, 0755)
+	if err != nil {
+		return fmt.Errorf("could not create directory: %w", err)
+	}
 
 	err = os.Rename(filepath.Join(from, jobFilename), filepath.Join(to, jobFilename))
 	if err != nil {
@@ -558,8 +631,16 @@ func (s *Spool) Status(tid string) (string, error) {
 	}
 	s.mu.Lock(eid.String())
 	defer s.mu.Unlock(eid.String())
+	return s.status(tid)
+}
 
-	for _, dir := range []string{queue, processing, sent, failed} {
+func (s *Spool) status(tid string) (string, error) {
+	eid, err := tid2eid(tid)
+	if err != nil {
+		return "", fmt.Errorf("could not parse xid: %w", err)
+	}
+
+	for _, dir := range statuses {
 		dirpath := eid2dir(s.cfg.Dir, dir, eid)
 		path := filepath.Join(dirpath, tid2name(tid))
 		if fileExists(path) {
@@ -567,6 +648,90 @@ func (s *Spool) Status(tid string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("could not find any reference to job %s", eid.String())
+}
+
+func (s *Spool) Retry(tid string) error {
+	eid, err := tid2eid(tid)
+	if err != nil {
+		return fmt.Errorf("could not parse xid: %w", err)
+	}
+	s.mu.Lock(eid.String())
+	defer s.mu.Unlock(eid.String())
+
+	status, err := s.status(tid)
+	if err != nil {
+		return fmt.Errorf("could not find any reference to job %s, %w", eid.String(), err)
+	}
+	if status == queue {
+		return fmt.Errorf("job %s is already in queue", eid.String())
+	}
+	if status == sent {
+		return fmt.Errorf("job %s is already sent", eid.String())
+	}
+	if status == retry {
+		return fmt.Errorf("job %s is already in retry", eid.String())
+	}
+
+	from := eid2dir(s.cfg.Dir, status, eid)
+	to := eid2dir(s.cfg.Dir, retry, eid)
+	jobFilename := tid2name(tid)
+
+	err = os.MkdirAll(to, 0755)
+	if err != nil {
+		return fmt.Errorf("could not create directory: %w", err)
+	}
+
+	err = os.Rename(filepath.Join(from, jobFilename), filepath.Join(to, jobFilename))
+	if err != nil {
+		return fmt.Errorf("could not move job file from %s to retry: %w", status, err)
+	}
+
+	_ = s.Logf(tid, "[spool] email has been requeued, moved from '%s' to 'retry'", status)
+	s.log.WithField("tid", tid).Debugf("succeed; email had moved to retry")
+
+	return nil
+}
+
+func (s *Spool) UpdateJob(j *Job) error {
+
+	s.mu.Lock(j.EID.String())
+	defer s.mu.Unlock(j.EID.String())
+	status, err := s.status(j.TID)
+	if err != nil {
+		return fmt.Errorf("could not find any reference to job %s, %w", j.EID.String(), err)
+	}
+
+	head, err := json.Marshal(j)
+	if err != nil {
+		return fmt.Errorf("could not encode head: %w", err)
+	}
+
+	dir := eid2dir(s.cfg.Dir, status, j.EID)
+	err = os.MkdirAll(dir, 0755)
+	if err != nil {
+		return fmt.Errorf("could not create directory: %w", err)
+	}
+
+	filename := tid2name(j.TID)
+	jobPath := filepath.Join(dir, filename)
+
+	f, err := os.OpenFile(jobPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_SYNC, 0644)
+	if err != nil {
+		err = fmt.Errorf("could not open job file: %w", err)
+		return errors.Join(err, f.Close())
+	}
+
+	_, err = f.Write(head)
+	if err != nil {
+		err = fmt.Errorf("could not write head: %w", err)
+		return errors.Join(err, f.Close())
+	}
+
+	err = f.Close()
+	if err != nil {
+		return fmt.Errorf("could not close job file: %w", err)
+	}
+	return nil
 
 }
 

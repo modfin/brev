@@ -399,6 +399,7 @@ type Connection interface {
 	SendMail(returnPath string, to []string, msg io.WriterTo) error
 	Close() error
 	SetLogger(logger Logger)
+	Noop() error
 }
 
 type connection struct {
@@ -440,6 +441,10 @@ func NewConnection(logger Logger, addr string, localName string, a Auth) (Connec
 		}
 	}
 	return c, nil
+}
+
+func (c *connection) Noop() error {
+	return c.client.Noop()
 }
 
 func (c *connection) SendMail(returnPath string, to []string, msg io.WriterTo) (err error) {
@@ -496,11 +501,16 @@ func (c *connection) SendMail(returnPath string, to []string, msg io.WriterTo) (
 		_ = c.client.Reset()
 		return err
 	}
+
 	return nil
 }
 
 func (c *connection) Close() error {
-	return c.client.Quit()
+	err := c.client.Quit()
+	if err != nil {
+		return errors.Join(err, c.client.Close())
+	}
+	return nil
 }
 
 // Extension reports whether an extension is support by the server.

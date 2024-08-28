@@ -13,6 +13,8 @@ triggers:
         --dkim-domain=example.com \
         --dkim-selector=brev \
         --dkim-key-file=./dkim-test-key/dkim-private.pem \
+        --mta-router-default-concurrency=1 \
+        --mta-router-server-concurrency=aspmx.l.google.com=2 \
         --dev
     shell: true
     delay: 100ms

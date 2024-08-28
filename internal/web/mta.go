@@ -76,7 +76,7 @@ func mta(s *Server) http.HandlerFunc {
 
 		messageId := email.Headers.GetFirst("Message-ID") // TODO check domain of message id if provided.
 		if !tools.ValidateMessageID(messageId) {
-			messageId = fmt.Sprintf("<%s+%s@%s", eid, escapedFrom, host)
+			messageId = fmt.Sprintf("<%s+%s@%s>", eid, escapedFrom, host)
 			email.Headers.Set("Message-ID", []string{messageId})
 		}
 

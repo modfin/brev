@@ -61,6 +61,49 @@ func main() {
 						Usage:   "the directory where the email spool will be stored",
 					},
 
+					&cli.IntFlag{
+						Name:    "mta-pool-size",
+						Value:   100,
+						EnvVars: []string{"BREV_MTA_POOL_SIZE"},
+						Usage:   "how many concurrent workers to use for sending emails",
+					},
+
+					&cli.IntFlag{
+						Name:    "mta-retry",
+						Value:   7,
+						EnvVars: []string{"BREV_MTA_RETRY"},
+						Usage:   "for recoverable errors, how many times should brev retry sending the email. eg gray in cases of listing, status 4xx errors",
+					},
+					&cli.DurationFlag{
+						Name:    "mta-retry-duration",
+						Value:   24 * time.Hour,
+						EnvVars: []string{"BREV_MTA_RETRY_DURATION"},
+						Usage:   "brev will use a exponential backoff strategy for retrying emails, this is the duration between the first and last attempt",
+					},
+
+					&cli.DurationFlag{
+						Name:    "mta-router-max-wait",
+						Value:   2 * time.Minute,
+						EnvVars: []string{"BREV_MTA_WAIT_FOR_CONNECTION"},
+						Usage:   "how long should a brev job wait for a connection to a mx server before giving up and reschedule if crowded",
+					},
+
+					&cli.IntFlag{
+						Name:    "mta-router-default-concurrency",
+						Value:   5,
+						EnvVars: []string{"BREV_MTA_ROUTER_DEFAULT_CONCURRENCY"},
+						Usage: `how many concurrent connection can brev open to a mail server. Ie. it set to 5, brev can open 5 connections to the same mail
+server, such as aspmx.l.google.com. Having to many concurrent connectons may result in emails beeing marked as spam. 
+5-10 seems like a good number to start with and can probably be increased once the IP is warmed up`,
+					},
+
+					&cli.StringSliceFlag{
+						Name:    "mta-router-server-concurrency",
+						EnvVars: []string{"BREV_MTA_ROUTER_SERVER_CONCURRENCY"},
+						Usage: `"used to set concurrency for specific mx servers, format aspmx.l.google.com=50 will set concurrency connection to 
+aspmx.l.google.com to 50`,
+					},
+
 					&cli.StringFlag{
 						Name:     "dkim-domain",
 						Required: true,
@@ -161,6 +204,7 @@ func start(c *cli.Context) error {
 	services = append(services, dnsxc)
 	if cfg.Dev {
 		dnsxc = dnsx.NewMock("mailhog:1025")
+		l.Warning("Dev mode, using mailhog as DNS resolver")
 	}
 
 	mta := mta.New(cfg.MTA, spool, dnsxc, lc)

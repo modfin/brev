@@ -11,12 +11,23 @@ import (
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
 	"github.com/sirupsen/logrus"
+	"math"
+	"math/rand"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Config struct {
+	PoolSize                 int      `cli:"mta-pool-size"`
+	RouterDefaultConcurrency int      `cli:"mta-router-default-concurrency"`
+	RouterServerConcurrency  []string `cli:"mta-router-server-concurrency"`
+
+	Wait4Connection time.Duration `cli:"mta-router-max-wait"`
+
+	Retries         int           `cli:"mta-retry"`
+	RetriesDuration time.Duration `cli:"mta-retry-duration"`
 }
 
 type MTA struct {
@@ -31,6 +42,8 @@ type MTA struct {
 	dns  dnsx.MXer
 
 	router *router
+
+	backoffer *backoffer
 }
 
 type queue interface {
@@ -42,11 +55,12 @@ func New(cfg Config, spool queue, dns dnsx.MXer, lc *tools.Logger) *MTA {
 	logger := lc.New("mta")
 
 	m := &MTA{
-		spool:  spool,
-		cfg:    cfg,
-		log:    logger,
-		dns:    dns,
-		router: newRouter(),
+		spool:     spool,
+		cfg:       cfg,
+		log:       logger,
+		dns:       dns,
+		router:    newRouter(lc, cfg),
+		backoffer: NewBackoffer(compare.Coalesce(cfg.Retries, 5), compare.Coalesce(cfg.RetriesDuration, 24*time.Hour)),
 	}
 
 	go m.start()
@@ -91,23 +105,58 @@ func (m *MTA) send(job *spool.Job) func() {
 		_ = job.Logf("[mta] submitting to router with mx servers [%s]", strings.Join(mxs, " "))
 		m.log.WithField("tid", job.TID).Debugf("submitting email to smtp mta router")
 
-		err = m.router.Route(job, mxs)
-		if err != nil {
-			m.log.WithError(err).WithField("tid", job.TID).Error("could not route email")
-			_ = job.Logf("[mta error] could not route email %s, err: %w", job.TID, err)
-			_ = job.Fail()
+		err = m.router.Route(context.Background(), job, mxs)
+
+		if err == nil {
+			m.log.WithField("tid", job.TID).Debugf("email has been sent")
+
+			err = job.Success()
+			if err != nil {
+				_ = job.Logf("[mta error] could not mark email %s as sent, err: %w", job.TID, err)
+				m.log.WithError(err).WithField("tid", job.TID).Error("could not mark email as successful")
+
+			}
+			_ = job.Logf("[mta] done, returning worker to pool")
 			return
 		}
 
-		m.log.WithField("tid", job.TID).Debugf("email has been sent")
+		m.log.WithError(err).WithField("tid", job.TID).Error("could not route email")
+		_ = job.Logf("[mta error] could not route email %s, err: %w", job.TID, err)
 
-		err = job.Success()
-		if err != nil {
-			_ = job.Logf("[mta error] could not mark email %s as sent, err: %w", job.TID, err)
-			m.log.WithError(err).WithField("tid", job.TID).Error("could not mark email as successful")
-
+		if errors.Is(err, ErrNoAvailableConnections) { // potential never ending loop?
+			/// Retrying with some jitter
+			job.NotBefore = time.Now().Add(time.Duration(
+				float64(m.backoffer.MustBackoff(0)) * rand.Float64(),
+			))
+			err = job.Retry()
+			if err != nil {
+				m.log.WithError(err).WithField("tid", job.TID).Error("could not add email to retry queue")
+				_ = job.Logf("[mta error] could not add email to retry queue %s, err: %w", job.TID, err)
+			}
+			return
 		}
-		_ = job.Logf("[mta] done")
+
+		if IsRecoverable(err) && job.Try < m.cfg.Retries {
+			next, err := m.backoffer.Backoff(job.Try)
+			if err != nil {
+				m.log.WithError(err).WithField("tid", job.TID).Debugf("could not backoff")
+				_ = job.Logf("[mta error] could not backoff %s, err: %w", job.TID, err)
+				_ = job.Fail()
+				return
+			}
+
+			job.NotBefore = time.Now().Add(next)
+			job.Try += 1
+			err = job.Retry()
+			if err != nil {
+				m.log.WithError(err).WithField("tid", job.TID).Error("could not add email to retry queue")
+				_ = job.Logf("[mta error] could not add email to retry queue %s, err: %w", job.TID, err)
+			}
+			return
+		}
+		_ = job.Logf("[mta error] error for %s is not recoverable, err: %w", job.TID, err)
+		_ = job.Fail()
+		return
 
 	}
 }
@@ -164,4 +213,32 @@ func (m *MTA) mxsOf(emails []string) ([]string, error) {
 	}
 
 	return mxs, err
+}
+
+type backoffer struct {
+	base     float64
+	maxRetry int
+}
+
+func NewBackoffer(maxRetries int, totalDuration time.Duration) *backoffer {
+
+	// base * (2^0+2^1 + ... + 2^maxRetries) = totalDuration
+	// (2^0+2^1 + ... + 2^maxRetries) = 2^(maxRetries+1) - 1
+	geosum := math.Pow(2, float64((maxRetries+1))) - 1
+	base := float64(totalDuration) / geosum
+	return &backoffer{
+		base:     base,
+		maxRetry: maxRetries,
+	}
+}
+
+func (b *backoffer) MustBackoff(retry int) time.Duration {
+	return time.Duration(b.base * math.Pow(2, float64(retry)))
+}
+
+func (b *backoffer) Backoff(retry int) (time.Duration, error) {
+	if retry > b.maxRetry {
+		return 0, errors.New("max retries exceeded")
+	}
+	return time.Duration(b.base * math.Pow(2, float64(retry))), nil
 }
