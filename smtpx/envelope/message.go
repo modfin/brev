@@ -526,7 +526,7 @@ func (w *messageWriter) writeHeader(k string, v ...string) {
 }
 
 func (w *messageWriter) writeLine(s string, charsLeft int) string {
-	// If there is already a newline before the limit. Write the line.
+	// If there is already a newline before the limit. OpenWrite the line.
 	if i := strings.IndexByte(s, '\n'); i != -1 && i < charsLeft {
 		w.writeString(s[:i+1])
 		return s[i+1:]

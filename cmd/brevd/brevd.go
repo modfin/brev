@@ -70,7 +70,7 @@ func main() {
 
 					&cli.IntFlag{
 						Name:    "mta-retry",
-						Value:   7,
+						Value:   5,
 						EnvVars: []string{"BREV_MTA_RETRY"},
 						Usage:   "for recoverable errors, how many times should brev retry sending the email. eg gray in cases of listing, status 4xx errors",
 					},
@@ -193,7 +193,11 @@ func start(c *cli.Context) error {
 
 	var services []Stoppable
 
-	spool, err := spool.New(cfg.Spool, lc)
+	sfs, err := spool.NewLocalFS(c.String("spool-dir"))
+	if err != nil {
+		return err
+	}
+	spool, err := spool.New(cfg.Spool, lc, sfs)
 	if err != nil {
 		return err
 	}
@@ -223,11 +227,12 @@ func start(c *cli.Context) error {
 	signal.Notify(sigc,
 		syscall.SIGHUP,
 		syscall.SIGINT,
+		syscall.SIGKILL,
 		syscall.SIGTERM,
 		syscall.SIGQUIT)
 
 	sig := <-sigc
-	log.Infof("Got signal: %s, shutting down", sig)
+	log.Infof("Got signal : %s, shutting down", sig)
 
 	shutdownCtx, _ := context.WithTimeout(c.Context, 30*time.Second)
 

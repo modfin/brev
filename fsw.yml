@@ -15,6 +15,8 @@ triggers:
         --dkim-key-file=./dkim-test-key/dkim-private.pem \
         --mta-router-default-concurrency=1 \
         --mta-router-server-concurrency=aspmx.l.google.com=2 \
+        --mta-retry=3 \
+        --mta-retry-duration=4m \
         --dev
     shell: true
     delay: 100ms

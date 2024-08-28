@@ -69,8 +69,8 @@ func New(cfg Config, spool queue, dns dnsx.MXer, lc *tools.Logger) *MTA {
 
 func (m *MTA) start() {
 
-	m.log.Infof("Starting mta, with %d-100 workers", runtime.NumCPU())
-	m.pool = pond.New(100, 0, pond.MinWorkers(runtime.NumCPU()))
+	m.log.Infof("Starting mta, with %d-%d workers", min(runtime.NumCPU(), m.cfg.PoolSize), m.cfg.PoolSize)
+	m.pool = pond.New(m.cfg.PoolSize, 0, pond.MinWorkers(min(runtime.NumCPU(), m.cfg.PoolSize)))
 
 	for job := range m.spool.Queue() {
 
@@ -97,7 +97,7 @@ func (m *MTA) send(job *spool.Job) func() {
 		if err != nil {
 			m.log.WithError(err).WithField("tid", job.TID).Error("could not find mx servers for emails")
 
-			_ = job.Logf("[mta error] could not find mx servers for emails %s, err: %w", job.TID, err)
+			_ = job.Logf("[mta error] could not find mx servers for emails %s, err: %s", job.TID, err.Error())
 			_ = job.Fail()
 			return
 		}
@@ -112,7 +112,7 @@ func (m *MTA) send(job *spool.Job) func() {
 
 			err = job.Success()
 			if err != nil {
-				_ = job.Logf("[mta error] could not mark email %s as sent, err: %w", job.TID, err)
+				_ = job.Logf("[mta error] could not mark email %s as sent, err: %s", job.TID, err.Error())
 				m.log.WithError(err).WithField("tid", job.TID).Error("could not mark email as successful")
 
 			}
@@ -121,7 +121,7 @@ func (m *MTA) send(job *spool.Job) func() {
 		}
 
 		m.log.WithError(err).WithField("tid", job.TID).Error("could not route email")
-		_ = job.Logf("[mta error] could not route email %s, err: %w", job.TID, err)
+		_ = job.Logf("[mta error] could not route email %s, err: %s", job.TID, err.Error())
 
 		if errors.Is(err, ErrNoAvailableConnections) { // potential never ending loop?
 			/// Retrying with some jitter
@@ -131,7 +131,7 @@ func (m *MTA) send(job *spool.Job) func() {
 			err = job.Retry()
 			if err != nil {
 				m.log.WithError(err).WithField("tid", job.TID).Error("could not add email to retry queue")
-				_ = job.Logf("[mta error] could not add email to retry queue %s, err: %w", job.TID, err)
+				_ = job.Logf("[mta error] could not add email to retry queue %s, err: %s", job.TID, err.Error())
 			}
 			return
 		}
@@ -140,7 +140,7 @@ func (m *MTA) send(job *spool.Job) func() {
 			next, err := m.backoffer.Backoff(job.Try)
 			if err != nil {
 				m.log.WithError(err).WithField("tid", job.TID).Debugf("could not backoff")
-				_ = job.Logf("[mta error] could not backoff %s, err: %w", job.TID, err)
+				_ = job.Logf("[mta error] could not backoff %s, err: %s", job.TID, err.Error())
 				_ = job.Fail()
 				return
 			}
@@ -150,11 +150,11 @@ func (m *MTA) send(job *spool.Job) func() {
 			err = job.Retry()
 			if err != nil {
 				m.log.WithError(err).WithField("tid", job.TID).Error("could not add email to retry queue")
-				_ = job.Logf("[mta error] could not add email to retry queue %s, err: %w", job.TID, err)
+				_ = job.Logf("[mta error] could not add email to retry queue %s, err: %s", job.TID, err.Error())
 			}
 			return
 		}
-		_ = job.Logf("[mta error] error for %s is not recoverable, err: %w", job.TID, err)
+		_ = job.Logf("[mta error] error for %s is not recoverable, err: %s", job.TID, err.Error())
 		_ = job.Fail()
 		return
 

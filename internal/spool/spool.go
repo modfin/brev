@@ -12,8 +12,6 @@ import (
 	"github.com/modfin/henry/slicez"
 	"github.com/sirupsen/logrus"
 	"io"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,7 +19,6 @@ import (
 )
 
 type Config struct {
-	Dir string `cli:"spool-dir"`
 }
 
 const log string = "log"
@@ -34,6 +31,7 @@ const failed string = "failed"
 const retry string = "retry"
 
 var statuses = []string{queue, processing, sent, failed, retry}
+var catagories = []string{log, canonical, queue, processing, sent, failed, retry}
 
 // TODO replace with a interface of an FS enabling the use of eg s3 and gcs instead of local disk
 
@@ -81,22 +79,22 @@ func (j *Job) Fail() error {
 	if j.spool == nil {
 		return fmt.Errorf("job has not been initialized and has no reference to spool")
 	}
-	return j.spool.Fail(j.TID)
+	return j.spool.Move(j.TID, processing, failed)
 }
 
 func (j *Job) Success() error {
 	if j.spool == nil {
 		return fmt.Errorf("job has not been initialized and has no reference to spool")
 	}
-	return j.spool.Succeed(j.TID)
+	return j.spool.Move(j.TID, processing, sent)
 }
 
-func (j *Job) Reader() (io.ReadSeekCloser, error) {
+func (j *Job) Reader() (io.ReadCloser, error) {
 	if j.spool == nil {
 		return nil, fmt.Errorf("job has not been initialized and has no reference to spool")
 	}
 
-	eml, err := os.OpenFile(j.emlPath, os.O_RDONLY, 0644)
+	eml, err := j.spool.fs.OpenReader(j.emlPath)
 	if err != nil {
 		return nil, fmt.Errorf("could not open eml file: %w", err)
 	}
@@ -130,22 +128,32 @@ func (j *Job) Retry() error {
 		return fmt.Errorf("could not update job: %w", err)
 	}
 
-	return j.spool.Retry(j.TID)
+	j.spool.log.WithField("tid", j.TID).Debugf("retry; will retry in %s", j.NotBefore.Sub(time.Now()).Truncate(time.Second).String())
+
+	// TODO could cause a raise condition between Status and Move since we dont lock
+	status, err := j.spool.Status(j.TID)
+	if err != nil {
+		return fmt.Errorf("could not find any reference to job %s, %w", j.TID, err)
+	}
+	if status == queue {
+		return fmt.Errorf("job %s is already in queue", j.TID)
+	}
+	if status == sent {
+		return fmt.Errorf("job %s is already sent", j.TID)
+	}
+	if status == retry {
+		return fmt.Errorf("job %s is already in retry", j.TID)
+	}
+
+	return j.spool.Move(j.TID, status, retry)
 }
 
-func New(config Config, lc *tools.Logger) (*Spool, error) {
+func New(config Config, lc *tools.Logger, fs SFS) (*Spool, error) {
 
 	logger := lc.New("spool")
 
-	for _, dir := range []string{log, queue, processing, sent, failed, retry} {
-		var err error
-		err = os.MkdirAll(filepath.Join(config.Dir, dir), 0755)
-		if err != nil {
-			return nil, fmt.Errorf("could not create directory: %w", err)
-		}
-	}
-
 	s := &Spool{
+		fs:    fs,
 		cfg:   config,
 		log:   logger,
 		mu:    tools.NewKeyedMutex(),
@@ -172,13 +180,14 @@ type Spool struct {
 	ostop  sync.Once
 
 	sig chan struct{}
+	fs  SFS
 }
 
 func (s *Spool) start() {
 	s.ostart.Do(func() {
 		s.ctx, s.cancel = context.WithCancel(compare.Coalesce(s.ctx, context.Background()))
-		a, _ := filepath.Abs(s.cfg.Dir)
-		s.log.Infof("Starting spool using %s", compare.Coalesce(a, s.cfg.Dir))
+
+		s.log.Infof("Starting spool using")
 
 		s.sigEnqueue()
 		go s.startProducer()
@@ -207,77 +216,79 @@ func (s *Spool) sigEnqueue() {
 }
 
 func (s *Spool) startProducer() {
-	dir := filepath.Join(s.cfg.Dir, queue)
 
-	s.log.Debug("walker; starting")
+	s.log.Infof("walker; starting")
 	for {
 
-		<-s.sig // Should contain stuff if there is something waiting or to be checked if waiting
+		select {
+		case <-s.ctx.Done():
+			s.log.Infof("walker; stopping")
+			return
+		case <-s.sig: // Should contain stuff if there is something waiting or to be checked if waiting
+		case <-time.After(2 * time.Minute):
+		}
+
 		s.log.Debug("walker; start walking queue dir")
-		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		s.fs.Walk(queue, func(path string) {
 			if filepath.Ext(path) != ".job" {
-				return nil
+				return
 			}
 			base := filepath.Base(path)
 			tid := strings.TrimSuffix(base, ".job")
+
 			// TODO rexexp check for tid
-			if err != nil {
-				s.log.WithError(err).Errorf("could not parse xid from %s", path)
-				return err
-			}
 
 			// TODO keep track of recently enqueued emails to avoid re-enqueuing or refactor to dequeue and not just send the reference
 			s.log.WithField("tid", tid).Debug("walker; dequeue job")
 			job, err := s.Dequeue(tid)
 			if err != nil {
 				s.log.WithError(err).WithField("tid", tid).Errorf("could not dequeue %s", tid)
-				return err
+				return
 			}
 			s.log.WithField("tid", tid).Debug("walker; writing job to spool consumer")
 			s.queue <- job // Blocking until the job is consumed
-
-			return nil
 		})
 
 	}
 }
 
 func (s *Spool) startRetryer() {
-	dir := filepath.Join(s.cfg.Dir, retry)
-	s.log.Debug("retry walker; starting")
+	s.log.Debug("retry-walker; starting")
 	for {
+		// Should contain stuff if there is something waiting or to be checked if waiting
+		select {
+		case <-s.ctx.Done():
+			s.log.Infof("retry-walker; stopping")
+			return
+		case <-time.After(1 * time.Minute):
+		}
 
-		<-time.After(time.Minute) // Should contain stuff if there is something waiting or to be checked if waiting
 		s.log.Debug("retry walker; start walking retry dir")
-		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		s.fs.Walk(retry, func(path string) {
 			if filepath.Ext(path) != ".job" {
-				return nil
+				return
 			}
 			base := filepath.Base(path)
 			tid := strings.TrimSuffix(base, ".job")
 			// TODO rexexp check for tid
-			if err != nil {
-				s.log.WithError(err).Errorf("could not parse xid from %s", path)
-				return err
-			}
 
-			// TODO keep track of recently enqueued emails to avoid re-enqueuing or refactor to dequeue and not just send the reference
-			s.log.WithField("tid", tid).Debug("retry walker; checking job")
+			s.log.WithField("tid", tid).Debug("retry walker; checking job, opening file, %s", path)
 
-			data, err := os.ReadFile(path)
+			data, err := ReadAll(path, s.fs)
 			if err != nil {
 				err = fmt.Errorf("could not read job file: %w", err)
 				_ = s.Logf(tid, "[spool error] faild read retry email: %s", err.Error())
 				s.log.WithError(err).WithField("tid", tid).Error("retry failed; could not read job file")
-				return nil
+				return
 			}
+
 			job := &Job{}
 			err = json.Unmarshal(data, &job)
 			if err != nil {
 				err = fmt.Errorf("could not unmarshal job, %w", err)
 				_ = s.Logf(tid, "[spool error] faild to retry email: %s", err.Error())
 				s.log.WithError(err).WithField("tid", tid).Error("retry failed; could not unmarshal job")
-				return nil
+				return
 			}
 
 			if time.Now().After(job.NotBefore) {
@@ -288,8 +299,6 @@ func (s *Spool) startRetryer() {
 					s.log.WithError(err).WithField("tid", tid).Error("retry failed; could not requeue job")
 				}
 			}
-
-			return nil
 		})
 
 	}
@@ -318,21 +327,17 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 	undo := func() error {
 		return errors.Join(slicez.Map(cleanup, func(path string) error {
 			s.log.Warnf("failed to commit email, cleaning up %s", path)
-			return os.Remove(path)
+			return s.fs.Remove(path)
 		})...)
 	}
 
-	dir := eid2dir(s.cfg.Dir, canonical, eid)
-	err = os.MkdirAll(dir, 0755)
-	if err != nil {
-		return fmt.Errorf("could not create directory: %w", err)
-	}
+	dir := eid2dir(canonical, eid)
 
 	filename := fmt.Sprintf("%s.eml", eid)
 	emailPath := filepath.Join(dir, filename)
 
 	//Sync since we want to leave as much garanees that we can that the mail has been committed
-	f, err := os.OpenFile(emailPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_SYNC, 0644)
+	f, err := s.fs.OpenWrite(emailPath, false)
 	if err != nil {
 		return err
 	}
@@ -357,18 +362,12 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 			return errors.Join(err, undo())
 		}
 
-		dir = eid2dir(s.cfg.Dir, queue, job.EID)
-		err = os.MkdirAll(dir, 0755)
-		if err != nil {
-			err = fmt.Errorf("could not create directory: %w", err)
-			return errors.Join(err, undo())
-		}
-
+		dir = eid2dir(queue, job.EID)
 		filename = tid2name(job.TID)
 		jobPath := filepath.Join(dir, filename)
 		cleanup = append(cleanup, jobPath)
 
-		f, err = os.OpenFile(jobPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_SYNC, 0644)
+		f, err = s.fs.OpenWrite(jobPath, false)
 		if err != nil {
 			err = fmt.Errorf("could not open job file: %w", err)
 			return errors.Join(err, f.Close(), undo())
@@ -428,16 +427,11 @@ func (s *Spool) lograw(tid string, data []byte) (err error) {
 		return fmt.Errorf("could not parse xid: %w", err)
 	}
 
-	dir := eid2dir(s.cfg.Dir, log, eid)
-	err = os.MkdirAll(dir, 0755)
-	if err != nil {
-		return fmt.Errorf("could not create directory: %w", err)
-	}
-
+	dir := eid2dir(log, eid)
 	filename := tid2name(tid)
 	path := filepath.Join(dir, filename)
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|os.O_SYNC, 0644)
+	f, err := s.fs.OpenWrite(path, true)
 	if err != nil {
 		return fmt.Errorf("could not open log file: %w", err)
 	}
@@ -462,27 +456,20 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	s.mu.Lock(eid.String())
 	defer s.mu.Unlock(eid.String())
 
-	emldir := eid2dir(s.cfg.Dir, canonical, eid)
-	queuedir := eid2dir(s.cfg.Dir, queue, eid)
-	procdir := eid2dir(s.cfg.Dir, processing, eid)
+	emldir := eid2dir(canonical, eid)
+	queuedir := eid2dir(queue, eid)
+	procdir := eid2dir(processing, eid)
 
 	jobFilename := tid2name(tid)
 
-	if !fileExists(filepath.Join(queuedir, jobFilename)) {
+	if !s.fs.Exist(filepath.Join(queuedir, jobFilename)) {
 		err = fmt.Errorf("could not find job file in queue dir, %s, err: %w", filepath.Join(queuedir, jobFilename), ErrNotFound)
 		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not find job file in queue dir")
 		return nil, err
 	}
 
-	err = os.MkdirAll(procdir, 0755)
-	if err != nil {
-		err = fmt.Errorf("could not create processing directory: %w", err)
-		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
-		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not create processing directory")
-		return nil, err
-	}
-	err = os.Rename(filepath.Join(queuedir, jobFilename), filepath.Join(procdir, jobFilename))
+	err = s.move(tid, queue, processing)
 	if err != nil {
 		err = fmt.Errorf("could not rename job file: %w", err)
 		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
@@ -490,7 +477,7 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 		return nil, err
 	}
 
-	data, err := os.ReadFile(filepath.Join(procdir, jobFilename))
+	data, err := ReadAll(filepath.Join(procdir, jobFilename), s.fs)
 	if err != nil {
 		err = fmt.Errorf("could not read job file: %w", err)
 		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
@@ -510,7 +497,7 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 
 	job.spool = s
 	job.emlPath = filepath.Join(emldir, fmt.Sprintf("%s.eml", eid))
-	if !fileExists(job.emlPath) {
+	if !s.fs.Exist(job.emlPath) {
 		err = fmt.Errorf("email file, %s, does not exist", job.emlPath)
 		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; email file does not exist")
@@ -520,72 +507,6 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	_ = s.Logf(tid, "[spool] email had been dequeued for processing")
 	s.log.WithField("tid", job.TID).Debugf("dequeue; email had been dequeued")
 	return &job, nil
-}
-
-func (s *Spool) Succeed(tid string) error {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return fmt.Errorf("could not parse xid: %w", err)
-	}
-	s.mu.Lock(eid.String())
-	defer s.mu.Unlock(eid.String())
-
-	procdir := eid2dir(s.cfg.Dir, processing, eid)
-	sentdir := eid2dir(s.cfg.Dir, sent, eid)
-
-	jobFilename := tid2name(tid)
-
-	if !fileExists(filepath.Join(procdir, jobFilename)) {
-		return fmt.Errorf("could not find job file in process dir, %s", filepath.Join(procdir, jobFilename))
-	}
-
-	err = os.MkdirAll(sentdir, 0775)
-	if err != nil {
-		return fmt.Errorf("could not create sent dir, %w", err)
-	}
-
-	err = os.Rename(filepath.Join(procdir, jobFilename), filepath.Join(sentdir, jobFilename))
-	if err != nil {
-		return fmt.Errorf("could not move job file to sent: %w", err)
-	}
-
-	_ = s.Logf(tid, "[spool] email had been successfully sent")
-	s.log.WithField("tid", tid).Debugf("succeed; email had been marked sent")
-
-	return nil
-}
-
-func (s *Spool) Fail(tid string) error {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return fmt.Errorf("could not parse xid: %w", err)
-	}
-	s.mu.Lock(eid.String())
-	defer s.mu.Unlock(eid.String())
-
-	procdir := eid2dir(s.cfg.Dir, processing, eid)
-	faildir := eid2dir(s.cfg.Dir, failed, eid)
-
-	jobFilename := tid2name(tid)
-
-	if !fileExists(filepath.Join(procdir, jobFilename)) {
-		return fmt.Errorf("could not find job file in process dir, %s", filepath.Join(procdir, jobFilename))
-	}
-
-	err = os.MkdirAll(faildir, 0775)
-	if err != nil {
-		return fmt.Errorf("could not create failed dir, %w", err)
-	}
-
-	err = os.Rename(filepath.Join(procdir, jobFilename), filepath.Join(faildir, jobFilename))
-	if err != nil {
-		return fmt.Errorf("could not move job file to sent: %w", err)
-	}
-
-	_ = s.Logf(tid, "[spool] email has failed to send")
-	s.log.WithField("tid", tid).Debugf("fail; email had been marked failed")
-
-	return nil
 }
 
 func (s *Spool) Requeue(tid string) error {
@@ -604,19 +525,13 @@ func (s *Spool) Requeue(tid string) error {
 		return fmt.Errorf("job %s is already in queue", eid.String())
 	}
 
-	from := eid2dir(s.cfg.Dir, status, eid)
-	to := eid2dir(s.cfg.Dir, queue, eid)
-	jobFilename := tid2name(tid)
-
-	err = os.MkdirAll(to, 0755)
+	err = s.move(tid, status, queue)
 	if err != nil {
-		return fmt.Errorf("could not create directory: %w", err)
+		return fmt.Errorf("could not Move job file from %s to queu: %w", status, err)
 	}
 
-	err = os.Rename(filepath.Join(from, jobFilename), filepath.Join(to, jobFilename))
-	if err != nil {
-		return fmt.Errorf("could not move job file from %s to queu: %w", status, err)
-	}
+	// Inform the walker that there is a new job to be dequeued
+	s.sigEnqueue()
 
 	_ = s.Logf(tid, "[spool] email has been requeued, moved from '%s' to 'queue'", status)
 	s.log.WithField("tid", tid).Debugf("succeed; email had been requeued")
@@ -641,16 +556,16 @@ func (s *Spool) status(tid string) (string, error) {
 	}
 
 	for _, dir := range statuses {
-		dirpath := eid2dir(s.cfg.Dir, dir, eid)
+		dirpath := eid2dir(dir, eid)
 		path := filepath.Join(dirpath, tid2name(tid))
-		if fileExists(path) {
+		if s.fs.Exist(path) {
 			return dir, nil
 		}
 	}
 	return "", fmt.Errorf("could not find any reference to job %s", eid.String())
 }
 
-func (s *Spool) Retry(tid string) error {
+func (s *Spool) Move(tid string, from string, to string) error {
 	eid, err := tid2eid(tid)
 	if err != nil {
 		return fmt.Errorf("could not parse xid: %w", err)
@@ -658,37 +573,27 @@ func (s *Spool) Retry(tid string) error {
 	s.mu.Lock(eid.String())
 	defer s.mu.Unlock(eid.String())
 
-	status, err := s.status(tid)
+	return s.move(tid, from, to)
+}
+func (s *Spool) move(tid string, from string, to string) error {
+	eid, err := tid2eid(tid)
 	if err != nil {
-		return fmt.Errorf("could not find any reference to job %s, %w", eid.String(), err)
-	}
-	if status == queue {
-		return fmt.Errorf("job %s is already in queue", eid.String())
-	}
-	if status == sent {
-		return fmt.Errorf("job %s is already sent", eid.String())
-	}
-	if status == retry {
-		return fmt.Errorf("job %s is already in retry", eid.String())
+		return fmt.Errorf("could not parse xid: %w", err)
 	}
 
-	from := eid2dir(s.cfg.Dir, status, eid)
-	to := eid2dir(s.cfg.Dir, retry, eid)
+	oldStatus := from
+	newStatus := to
+	from = eid2dir(oldStatus, eid)
+	to = eid2dir(newStatus, eid)
 	jobFilename := tid2name(tid)
 
-	err = os.MkdirAll(to, 0755)
+	err = s.fs.Rename(filepath.Join(from, jobFilename), filepath.Join(to, jobFilename))
 	if err != nil {
-		return fmt.Errorf("could not create directory: %w", err)
+		return fmt.Errorf("could not Move job file from %s to %s: %w", oldStatus, newStatus, err)
 	}
 
-	err = os.Rename(filepath.Join(from, jobFilename), filepath.Join(to, jobFilename))
-	if err != nil {
-		return fmt.Errorf("could not move job file from %s to retry: %w", status, err)
-	}
-
-	_ = s.Logf(tid, "[spool] email has been requeued, moved from '%s' to 'retry'", status)
-	s.log.WithField("tid", tid).Debugf("succeed; email had moved to retry")
-
+	_ = s.Logf(tid, "[spool] email has marked as '%s', moved from '%s' to '%s'", newStatus, oldStatus, newStatus)
+	s.log.WithField("tid", tid).Debugf("Move; email had moved from %s to %s", oldStatus, newStatus)
 	return nil
 }
 
@@ -706,16 +611,12 @@ func (s *Spool) UpdateJob(j *Job) error {
 		return fmt.Errorf("could not encode head: %w", err)
 	}
 
-	dir := eid2dir(s.cfg.Dir, status, j.EID)
-	err = os.MkdirAll(dir, 0755)
-	if err != nil {
-		return fmt.Errorf("could not create directory: %w", err)
-	}
+	dir := eid2dir(status, j.EID)
 
 	filename := tid2name(j.TID)
 	jobPath := filepath.Join(dir, filename)
 
-	f, err := os.OpenFile(jobPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_SYNC, 0644)
+	f, err := s.fs.OpenWrite(jobPath, false)
 	if err != nil {
 		err = fmt.Errorf("could not open job file: %w", err)
 		return errors.Join(err, f.Close())
@@ -747,14 +648,9 @@ func tid2eid(tid string) (zid.ID, error) {
 	return eid, nil
 }
 
-func eid2dir(prefix string, catalog string, eid zid.ID) string {
+func eid2dir(catalog string, eid zid.ID) string {
 	t := eid.Time()
 	day := t.In(time.UTC).Format("2006-01-02")
 	hour := t.In(time.UTC).Format("15")
-	return filepath.Join(prefix, catalog, day, hour)
-}
-
-func fileExists(filePath string) bool {
-	_, err := os.Stat(filePath)
-	return !errors.Is(err, os.ErrNotExist)
+	return filepath.Join(catalog, day, hour)
 }
