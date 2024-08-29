@@ -74,6 +74,15 @@ func FromTID(tid string) (ID, int, error) {
 	return id, tt, nil
 }
 
+func From(tid_eid string) (ID, error) {
+	id, _, err := FromTID(tid_eid)
+	if err == nil {
+		return id, nil
+	}
+	return FromString(tid_eid)
+
+}
+
 func New() ID {
 	return ID{
 		internal: xid.New(),

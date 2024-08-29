@@ -12,7 +12,6 @@ import (
 	"github.com/modfin/henry/slicez"
 	"github.com/sirupsen/logrus"
 	"io"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -57,8 +56,7 @@ type Job struct {
 
 	LocalName string `json:"local_name"`
 
-	emlPath string
-	spool   *Spool
+	spool *Spool
 }
 
 func (j *Job) Status(tid string) (string, error) {
@@ -94,7 +92,7 @@ func (j *Job) Reader() (io.ReadCloser, error) {
 		return nil, fmt.Errorf("job has not been initialized and has no reference to spool")
 	}
 
-	eml, err := j.spool.fs.OpenReader(j.emlPath)
+	eml, err := j.spool.fs.OpenReader(canonical, j.TID)
 	if err != nil {
 		return nil, fmt.Errorf("could not open eml file: %w", err)
 	}
@@ -156,7 +154,6 @@ func New(config Config, lc *tools.Logger, fs SFS) (*Spool, error) {
 		fs:    fs,
 		cfg:   config,
 		log:   logger,
-		mu:    tools.NewKeyedMutex(),
 		queue: make(chan *Job), // ensures there is a handover.
 		ctx:   context.Background(),
 		sig:   make(chan struct{}, 1),
@@ -172,7 +169,6 @@ type Spool struct {
 	cancel func()
 
 	log   *logrus.Logger
-	mu    *tools.KeyedMutex
 	cfg   Config
 	queue chan *Job
 
@@ -229,16 +225,8 @@ func (s *Spool) startProducer() {
 		}
 
 		s.log.Debug("walker; start walking queue dir")
-		s.fs.Walk(queue, func(path string) {
-			if filepath.Ext(path) != ".job" {
-				return
-			}
-			base := filepath.Base(path)
-			tid := strings.TrimSuffix(base, ".job")
+		s.fs.Walk(queue, func(tid string) {
 
-			// TODO rexexp check for tid
-
-			// TODO keep track of recently enqueued emails to avoid re-enqueuing or refactor to dequeue and not just send the reference
 			s.log.WithField("tid", tid).Debug("walker; dequeue job")
 			job, err := s.Dequeue(tid)
 			if err != nil {
@@ -264,17 +252,11 @@ func (s *Spool) startRetryer() {
 		}
 
 		s.log.Debug("retry walker; start walking retry dir")
-		s.fs.Walk(retry, func(path string) {
-			if filepath.Ext(path) != ".job" {
-				return
-			}
-			base := filepath.Base(path)
-			tid := strings.TrimSuffix(base, ".job")
-			// TODO rexexp check for tid
+		s.fs.Walk(retry, func(tid string) {
 
-			s.log.WithField("tid", tid).Debug("retry walker; checking job, opening file, %s", path)
+			s.log.WithField("tid", tid).Debug("retry walker; checking job, opening file, %s", tid)
 
-			data, err := ReadAll(path, s.fs)
+			data, err := ReadAll(retry, tid, s.fs)
 			if err != nil {
 				err = fmt.Errorf("could not read job file: %w", err)
 				_ = s.Logf(tid, "[spool error] faild read retry email: %s", err.Error())
@@ -318,31 +300,27 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 		return fmt.Errorf("all jobs must have the same EID")
 	}
 
-	s.mu.Lock(eid.String())
-	defer s.mu.Unlock(eid.String())
+	s.fs.Lock(eid.String())
+	defer s.fs.Unlock(eid.String())
 
 	var err error
 
 	var cleanup []string
 	undo := func() error {
-		return errors.Join(slicez.Map(cleanup, func(path string) error {
-			s.log.Warnf("failed to commit email, cleaning up %s", path)
-			return s.fs.Remove(path)
+		return errors.Join(slicez.Map(cleanup, func(file string) error {
+			s.log.Warnf("failed to commit email, cleaning up %s", file)
+			catagory, tid, _ := strings.Cut(file, ":")
+			return s.fs.Remove(catagory, tid)
 		})...)
 	}
 
-	dir := eid2dir(canonical, eid)
-
-	filename := fmt.Sprintf("%s.eml", eid)
-	emailPath := filepath.Join(dir, filename)
-
 	//Sync since we want to leave as much garanees that we can that the mail has been committed
-	f, err := s.fs.OpenWrite(emailPath, false)
+	f, err := s.fs.OpenWriter(canonical, eid.String()) // TODO does it work, should really be TID
 	if err != nil {
-		return err
+		return fmt.Errorf("could not open email file writer for eid %s: %w", eid.String(), err)
 	}
 
-	cleanup = append(cleanup, emailPath)
+	cleanup = append(cleanup, fmt.Sprintf("%s:%s", canonical, eid.String()))
 	_, err = io.Copy(f, email)
 	if err != nil {
 		return errors.Join(err, f.Close(), undo())
@@ -355,39 +333,44 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 	}
 
 	for _, job := range jobs {
+		fun := func() error {
+			s.fs.Lock(job.TID)
+			defer s.fs.Unlock(job.TID)
 
-		head, err := json.Marshal(job)
-		if err != nil {
-			err = fmt.Errorf("could not encode head: %w", err)
-			return errors.Join(err, undo())
+			head, err := json.Marshal(job)
+			if err != nil {
+				err = fmt.Errorf("could not encode head: %w", err)
+				return errors.Join(err, undo())
+			}
+
+			cleanup = append(cleanup, fmt.Sprintf("%s:%s", queue, job.TID))
+
+			f, err = s.fs.OpenWriter(queue, job.TID)
+			if err != nil {
+				err = fmt.Errorf("could not open job file: %w", err)
+				return errors.Join(err, f.Close(), undo())
+			}
+
+			_, err = f.Write(head)
+			if err != nil {
+				err = fmt.Errorf("could not write head: %w", err)
+				return errors.Join(err, f.Close(), undo())
+			}
+
+			err = f.Close()
+			if err != nil {
+				err = fmt.Errorf("could not close job file: %w", err)
+				return errors.Join(err, undo())
+			}
+			s.log.WithField("tid", job.TID).Debugf("enqueue; email had been enqueued")
+			_ = s.Logf(job.TID, "[spool] email has been written to disk and enqueued")
+			_ = s.Logf(job.TID, "[spool] rcpt [%s]", strings.Join(job.Rcpt, " "))
+			return nil
 		}
-
-		dir = eid2dir(queue, job.EID)
-		filename = tid2name(job.TID)
-		jobPath := filepath.Join(dir, filename)
-		cleanup = append(cleanup, jobPath)
-
-		f, err = s.fs.OpenWrite(jobPath, false)
+		err = fun()
 		if err != nil {
-			err = fmt.Errorf("could not open job file: %w", err)
-			return errors.Join(err, f.Close(), undo())
+			return err
 		}
-
-		_, err = f.Write(head)
-		if err != nil {
-			err = fmt.Errorf("could not write head: %w", err)
-			return errors.Join(err, f.Close(), undo())
-		}
-
-		err = f.Close()
-		if err != nil {
-			err = fmt.Errorf("could not close job file: %w", err)
-			return errors.Join(err, undo())
-		}
-		s.log.WithField("tid", job.TID).Debugf("enqueue; email had been enqueued")
-		_ = s.Logf(job.TID, "[spool] email has been written to disk and enqueued")
-		_ = s.Logf(job.TID, "[spool] rcpt [%s]", strings.Join(job.Rcpt, " "))
-
 	}
 	s.sigEnqueue()
 	return nil
@@ -395,20 +378,17 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 }
 
 func (s *Spool) Logf(tid string, format string, args ...interface{}) (err error) {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return fmt.Errorf("could not parse xid: %w", err)
-	}
-	s.mu.Lock(tid + ".log")
-	defer s.mu.Unlock(tid + ".log")
+
+	s.fs.Lock(tid + ".log")
+	defer s.fs.Unlock(tid + ".log")
 
 	msg := struct {
 		TS  string `json:"ts"`
-		EID string `json:"eid"`
+		TID string `json:"tid"`
 		MSG string `json:"msg"`
 	}{
 		TS:  time.Now().In(time.UTC).Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z"),
-		EID: eid.String(),
+		TID: tid,
 		MSG: fmt.Sprintf(format, args...),
 	}
 
@@ -419,19 +399,10 @@ func (s *Spool) Logf(tid string, format string, args ...interface{}) (err error)
 	if err != nil {
 		return fmt.Errorf("could not encode message: %w", err)
 	}
-	return s.lograw(tid, buff.Bytes())
+	return s.logf(tid, buff.Bytes())
 }
-func (s *Spool) lograw(tid string, data []byte) (err error) {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return fmt.Errorf("could not parse xid: %w", err)
-	}
-
-	dir := eid2dir(log, eid)
-	filename := tid2name(tid)
-	path := filepath.Join(dir, filename)
-
-	f, err := s.fs.OpenWrite(path, true)
+func (s *Spool) logf(tid string, data []byte) (err error) {
+	f, err := s.fs.OpenWriter(log, tid)
 	if err != nil {
 		return fmt.Errorf("could not open log file: %w", err)
 	}
@@ -449,23 +420,26 @@ func (s *Spool) lograw(tid string, data []byte) (err error) {
 var ErrNotFound = errors.New("not found")
 
 func (s *Spool) Dequeue(tid string) (*Job, error) {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return nil, fmt.Errorf("could not parse xid: %w", err)
-	}
-	s.mu.Lock(eid.String())
-	defer s.mu.Unlock(eid.String())
+	s.fs.Lock(tid)
+	defer s.fs.Unlock(tid)
 
-	emldir := eid2dir(canonical, eid)
-	queuedir := eid2dir(queue, eid)
-	procdir := eid2dir(processing, eid)
+	//emldir := eid2dir(canonical, eid)
+	//queuedir := eid2dir(queue, eid)
+	//procdir := eid2dir(processing, eid)
+	//jobFilename := tid2name(tid)
 
-	jobFilename := tid2name(tid)
-
-	if !s.fs.Exist(filepath.Join(queuedir, jobFilename)) {
-		err = fmt.Errorf("could not find job file in queue dir, %s, err: %w", filepath.Join(queuedir, jobFilename), ErrNotFound)
+	var err error
+	if !s.fs.Exist(queue, tid) {
+		err = fmt.Errorf("could not find job file in queue dir, %s, err: %w", tid, ErrNotFound)
 		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not find job file in queue dir")
+		return nil, err
+	}
+
+	if !s.fs.Exist(canonical, tid) {
+		err = fmt.Errorf("email file, %s, does not exist", tid)
+		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
+		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; email file does not exist")
 		return nil, err
 	}
 
@@ -477,7 +451,7 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 		return nil, err
 	}
 
-	data, err := ReadAll(filepath.Join(procdir, jobFilename), s.fs)
+	data, err := ReadAll(processing, tid, s.fs)
 	if err != nil {
 		err = fmt.Errorf("could not read job file: %w", err)
 		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
@@ -494,15 +468,7 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not unmarshal job")
 		return nil, err
 	}
-
 	job.spool = s
-	job.emlPath = filepath.Join(emldir, fmt.Sprintf("%s.eml", eid))
-	if !s.fs.Exist(job.emlPath) {
-		err = fmt.Errorf("email file, %s, does not exist", job.emlPath)
-		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
-		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; email file does not exist")
-		return nil, err
-	}
 
 	_ = s.Logf(tid, "[spool] email had been dequeued for processing")
 	s.log.WithField("tid", job.TID).Debugf("dequeue; email had been dequeued")
@@ -510,19 +476,15 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 }
 
 func (s *Spool) Requeue(tid string) error {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return fmt.Errorf("could not parse xid: %w", err)
-	}
-	s.mu.Lock(eid.String())
-	defer s.mu.Unlock(eid.String())
+	s.fs.Lock(tid)
+	defer s.fs.Unlock(tid)
 
 	status, err := s.status(tid)
 	if err != nil {
-		return fmt.Errorf("could not find any reference to job %s, %w", eid.String(), err)
+		return fmt.Errorf("could not find any reference to job %s, %w", tid, err)
 	}
 	if status == queue {
-		return fmt.Errorf("job %s is already in queue", eid.String())
+		return fmt.Errorf("job %s is already in queue", tid)
 	}
 
 	err = s.move(tid, status, queue)
@@ -540,67 +502,50 @@ func (s *Spool) Requeue(tid string) error {
 }
 
 func (s *Spool) Status(tid string) (string, error) {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return "", fmt.Errorf("could not parse xid: %w", err)
-	}
-	s.mu.Lock(eid.String())
-	defer s.mu.Unlock(eid.String())
+	s.fs.Lock(tid)
+	defer s.fs.Unlock(tid)
 	return s.status(tid)
 }
 
 func (s *Spool) status(tid string) (string, error) {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return "", fmt.Errorf("could not parse xid: %w", err)
-	}
-
-	for _, dir := range statuses {
-		dirpath := eid2dir(dir, eid)
-		path := filepath.Join(dirpath, tid2name(tid))
-		if s.fs.Exist(path) {
-			return dir, nil
+	for _, category := range statuses {
+		if s.fs.Exist(category, tid) {
+			return category, nil
 		}
 	}
-	return "", fmt.Errorf("could not find any reference to job %s", eid.String())
+	return "", fmt.Errorf("could not find any reference to job %s", tid)
 }
 
 func (s *Spool) Move(tid string, from string, to string) error {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return fmt.Errorf("could not parse xid: %w", err)
-	}
-	s.mu.Lock(eid.String())
-	defer s.mu.Unlock(eid.String())
+	s.fs.Lock(tid)
+	defer s.fs.Unlock(tid)
 
 	return s.move(tid, from, to)
 }
 func (s *Spool) move(tid string, from string, to string) error {
-	eid, err := tid2eid(tid)
-	if err != nil {
-		return fmt.Errorf("could not parse xid: %w", err)
+
+	if !slicez.Contains(statuses, from) {
+		return fmt.Errorf("invalid 'from' status: %s", from)
+	}
+	if !slicez.Contains(statuses, to) {
+		return fmt.Errorf("invalid 'to' status: %s", to)
 	}
 
-	oldStatus := from
-	newStatus := to
-	from = eid2dir(oldStatus, eid)
-	to = eid2dir(newStatus, eid)
-	jobFilename := tid2name(tid)
+	err := s.fs.Move(tid, from, to)
 
-	err = s.fs.Rename(filepath.Join(from, jobFilename), filepath.Join(to, jobFilename))
 	if err != nil {
-		return fmt.Errorf("could not Move job file from %s to %s: %w", oldStatus, newStatus, err)
+		return fmt.Errorf("could not Move job file from %s to %s: %w", from, to, err)
 	}
 
-	_ = s.Logf(tid, "[spool] email has marked as '%s', moved from '%s' to '%s'", newStatus, oldStatus, newStatus)
-	s.log.WithField("tid", tid).Debugf("Move; email had moved from %s to %s", oldStatus, newStatus)
+	_ = s.Logf(tid, "[spool] email has marked as '%s', moved from '%s' to '%s'", to, from, to)
+	s.log.WithField("tid", tid).Debugf("Move; email had moved from %s to %s", from, to)
 	return nil
 }
 
 func (s *Spool) UpdateJob(j *Job) error {
 
-	s.mu.Lock(j.EID.String())
-	defer s.mu.Unlock(j.EID.String())
+	s.fs.Lock(j.TID)
+	defer s.fs.Unlock(j.TID)
 	status, err := s.status(j.TID)
 	if err != nil {
 		return fmt.Errorf("could not find any reference to job %s, %w", j.EID.String(), err)
@@ -611,12 +556,7 @@ func (s *Spool) UpdateJob(j *Job) error {
 		return fmt.Errorf("could not encode head: %w", err)
 	}
 
-	dir := eid2dir(status, j.EID)
-
-	filename := tid2name(j.TID)
-	jobPath := filepath.Join(dir, filename)
-
-	f, err := s.fs.OpenWrite(jobPath, false)
+	f, err := s.fs.OpenWriter(status, j.TID)
 	if err != nil {
 		err = fmt.Errorf("could not open job file: %w", err)
 		return errors.Join(err, f.Close())
@@ -634,23 +574,4 @@ func (s *Spool) UpdateJob(j *Job) error {
 	}
 	return nil
 
-}
-
-func tid2name(tid string) string {
-	return fmt.Sprintf("%s.job", tid)
-}
-
-func tid2eid(tid string) (zid.ID, error) {
-	eid, _, err := zid.FromTID(tid)
-	if err != nil {
-		return zid.ID{}, fmt.Errorf("could not parse xid from tid: %w", err)
-	}
-	return eid, nil
-}
-
-func eid2dir(catalog string, eid zid.ID) string {
-	t := eid.Time()
-	day := t.In(time.UTC).Format("2006-01-02")
-	hour := t.In(time.UTC).Format("15")
-	return filepath.Join(catalog, day, hour)
 }

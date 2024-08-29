@@ -108,6 +108,7 @@ func mta(s *Server) http.HandlerFunc {
 
 		err = s.spool.Enqueue(jobs, emlreader) // todo add signer.
 		if err != nil {
+			s.log.WithError(err).Error("could not enqueue email")
 			respond(w, http.StatusInternalServerError, "could not enqueue email")
 			return
 		}
