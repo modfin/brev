@@ -31,6 +31,9 @@ type SFS interface {
 type SFSOpenReader interface {
 	OpenReader(category string, tid string) (io.ReadCloser, error)
 }
+type SFSOpenWriter interface {
+	OpenWriter(category string, tid string) (io.WriteCloser, error)
+}
 
 func ReadAll(category string, tid string, oppener SFSOpenReader) ([]byte, error) {
 	r, err := oppener.OpenReader(category, tid)
@@ -38,6 +41,19 @@ func ReadAll(category string, tid string, oppener SFSOpenReader) ([]byte, error)
 		return nil, err
 	}
 	return io.ReadAll(r)
+}
+
+func WriteAll(category string, tid string, data []byte, writer SFSOpenWriter) error {
+	r, err := writer.OpenWriter(category, tid)
+	if err != nil {
+		return err
+	}
+	_, err = r.Write(data)
+	if err != nil {
+		return err
+	}
+
+	return r.Close()
 }
 
 func NewLocalFS(root string) (SFS, error) {
@@ -231,8 +247,6 @@ func (l LocalFS) Exist(category string, tid string) bool {
 	if err != nil {
 		return false
 	}
-
 	_, err = os.Stat(path)
-	fmt.Println("PPP", path, err)
 	return !errors.Is(err, os.ErrNotExist)
 }

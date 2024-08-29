@@ -315,6 +315,7 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 	}
 
 	//Sync since we want to leave as much garanees that we can that the mail has been committed
+
 	f, err := s.fs.OpenWriter(canonical, eid.String()) // TODO does it work, should really be TID
 	if err != nil {
 		return fmt.Errorf("could not open email file writer for eid %s: %w", eid.String(), err)
@@ -345,21 +346,9 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 
 			cleanup = append(cleanup, fmt.Sprintf("%s:%s", queue, job.TID))
 
-			f, err = s.fs.OpenWriter(queue, job.TID)
+			err = WriteAll(queue, job.TID, head, s.fs)
 			if err != nil {
-				err = fmt.Errorf("could not open job file: %w", err)
-				return errors.Join(err, f.Close(), undo())
-			}
-
-			_, err = f.Write(head)
-			if err != nil {
-				err = fmt.Errorf("could not write head: %w", err)
-				return errors.Join(err, f.Close(), undo())
-			}
-
-			err = f.Close()
-			if err != nil {
-				err = fmt.Errorf("could not close job file: %w", err)
+				err = fmt.Errorf("could not write job file: %w", err)
 				return errors.Join(err, undo())
 			}
 			s.log.WithField("tid", job.TID).Debugf("enqueue; email had been enqueued")
@@ -556,22 +545,11 @@ func (s *Spool) UpdateJob(j *Job) error {
 		return fmt.Errorf("could not encode head: %w", err)
 	}
 
-	f, err := s.fs.OpenWriter(status, j.TID)
+	err = WriteAll(status, j.TID, head, s.fs)
 	if err != nil {
-		err = fmt.Errorf("could not open job file: %w", err)
-		return errors.Join(err, f.Close())
+		return fmt.Errorf("could not write head: %w", err)
 	}
 
-	_, err = f.Write(head)
-	if err != nil {
-		err = fmt.Errorf("could not write head: %w", err)
-		return errors.Join(err, f.Close())
-	}
-
-	err = f.Close()
-	if err != nil {
-		return fmt.Errorf("could not close job file: %w", err)
-	}
 	return nil
 
 }
