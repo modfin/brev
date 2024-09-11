@@ -4,17 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/modfin/brev/internal/metrics"
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/smtpx"
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/mapz"
 	"github.com/modfin/henry/slicez"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"net/textproto"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Recoverable errors
@@ -35,7 +38,7 @@ func IsRecoverable(err error) bool {
 	})
 }
 
-func newRouter(lc *tools.Logger, config Config) *router {
+func newRouter(lc *tools.Logger, config Config, metrics *metrics.Metrics) *router {
 	l := lc.New("mta-router")
 
 	concurrency := config.RouterDefaultConcurrency
@@ -64,19 +67,36 @@ func newRouter(lc *tools.Logger, config Config) *router {
 	l.Infof("adding spcific server concurrency for: %v", entries)
 
 	return &router{
+		fqdn:               config.FQDN,
 		log:                l,
 		defaultConcurrency: concurrency,
 		servers:            map[string]*server{},
 		serverConcurrency:  mapz.FromEntries(entries),
+		metrics: routerMetrics{
+			borrowHistogram: metrics.Register().NewHistogramVec(prometheus.HistogramOpts{
+				Name: "mta_router__borrow_wait_time", Help: "wait time for borrowing a connection to a mx from the router in seconds",
+			}, []string{"mx", "success"}),
+			sendHistogram: metrics.Register().NewHistogramVec(prometheus.HistogramOpts{
+				Name: "mta_router__send_time", Help: "time to send email to mx from the router in seconds",
+			}, []string{"mx", "success"}),
+		},
 	}
 }
 
+type routerMetrics struct {
+	borrowHistogram *prometheus.HistogramVec
+	sendHistogram   *prometheus.HistogramVec
+}
+
 type router struct {
+	// The "Fully Qualifying Domain Name" is used for "HELO" in smtp, hould be the fully qualified domain name (FQDN) of the sending server
+	fqdn               string
 	defaultConcurrency int
 	serverConcurrency  map[string]int
 	servers            map[string]*server
 	mu                 sync.Mutex
 	log                *logrus.Logger
+	metrics            routerMetrics
 }
 
 func (r *router) server(name string) *server {
@@ -135,12 +155,21 @@ func (c *connection) Return() {
 	c.s.conn <- c
 }
 
+type lgr struct {
+	job *spool.Job
+}
+
+func (l lgr) Logf(format string, args ...interface{}) error {
+	return l.job.Log().Printf(format, args...)
+}
+
 func (c *connection) ensureconn(job *spool.Job) error {
 	var err error
 
+	lgr := lgr{job: job}
 	setlogger := func() {
 		if c.conn != nil {
-			c.conn.SetLogger(job)
+			c.conn.SetLogger(lgr)
 		}
 	}
 
@@ -149,11 +178,12 @@ func (c *connection) ensureconn(job *spool.Job) error {
 
 	connect := func() error {
 		if c.conn != nil {
-			job.Logf("[mta-router] forcing close of connection to %s", c.s.name)
+			_ = job.Log().With("mx", c.s.name).With("instance", c.instance).Printf("[mta-router] stale connection, forcing close of connection")
 			_ = c.conn.Close()
 		}
 
-		c.conn, err = smtpx.NewConnection(job, c.s.name, job.LocalName, nil)
+		_ = job.Log().With("mx", c.s.name).With("instance", c.instance).Printf("[mta-router] connecting to server")
+		c.conn, err = smtpx.NewConnection(lgr, c.s.name, c.s.router.fqdn, nil)
 		if err != nil {
 			return fmt.Errorf("could not connect to server: %w, %w", err, ErrCouldNotConnect)
 		}
@@ -167,7 +197,9 @@ func (c *connection) ensureconn(job *spool.Job) error {
 	return connect()
 }
 func (c *connection) SendMail(job *spool.Job) error {
-	fmt.Printf("[conn %s %d] sending mail", c.s.name, c.instance)
+	_ = job.Log().With("mx", c.s.name).With("instance", c.instance).Printf("[mta-router] sending email")
+	c.s.router.log.WithField("mx", c.s.name).WithField("instance", c.instance).Debugf("sending email")
+
 	err := c.ensureconn(job)
 	if err != nil {
 		return fmt.Errorf("could not ensure connection: %w", err)
@@ -200,18 +232,25 @@ func (r *router) Route(ctx context.Context, job *spool.Job, servers []string) er
 	}
 
 	r.log.Debugf("fetching server for %s", servers[0])
-	srv := r.server(servers[0])
-
+	srv := r.server(servers[0]) // TODO do something with the other servers if first one fails
 	r.log.Debugf("borrowing connection from %s", srv.name)
+
+	startBorrow := time.Now()
 	conn, err := srv.Borrow(ctx)
+	r.metrics.borrowHistogram.WithLabelValues(srv.name, compare.Ternary(err == nil, "true", "false")).Observe(time.Since(startBorrow).Seconds())
 	if err != nil {
 		return fmt.Errorf("could not borrow connection: %w", err)
 	}
+	_ = job.Log().With("mx", srv.name).With("instance", conn.instance).Printf("[mta-router] borrowed connection")
+
 	defer conn.Return()
 
+	startSend := time.Now()
 	err = conn.SendMail(job)
+	r.metrics.sendHistogram.WithLabelValues(srv.name, compare.Ternary(err == nil, "true", "false")).Observe(time.Since(startSend).Seconds())
 	if err != nil {
 		return fmt.Errorf("could not send email: %w", err)
 	}
+
 	return nil
 }

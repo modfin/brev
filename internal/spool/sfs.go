@@ -3,6 +3,7 @@ package spool
 import (
 	"errors"
 	"fmt"
+	"github.com/modfin/brev/internal/metrics"
 	"github.com/modfin/brev/pkg/zid"
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/slicez"
@@ -56,7 +57,7 @@ func WriteAll(category string, tid string, data []byte, writer SFSOpenWriter) er
 	return r.Close()
 }
 
-func NewLocalFS(root string) (SFS, error) {
+func NewLocalFS(root string, metrics *metrics.Metrics) (SFS, error) {
 
 	l := &LocalFS{root: root, mu: tools.NewKeyedMutex()}
 	for _, dir := range catagories {

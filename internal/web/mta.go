@@ -76,7 +76,7 @@ func mta(s *Server) http.HandlerFunc {
 
 		messageId := email.Headers.GetFirst("Message-ID") // TODO check domain of message id if provided.
 		if !tools.ValidateMessageID(messageId) {
-			messageId = fmt.Sprintf("<%s+%s@%s>", eid, escapedFrom, host)
+			messageId = fmt.Sprintf("<%s+%s+%s@%s>", eid, escapedFrom, s.cfg.DefaultHost, host)
 			email.Headers.Set("Message-ID", []string{messageId})
 		}
 
@@ -97,13 +97,21 @@ func mta(s *Server) http.HandlerFunc {
 		jobs := slicez.Map(mapz.Values(groups), func(emails []string) spool.Job {
 			defer func() { i += 1 }()
 			tid := eid.ToTID(i)
-			return spool.Job{
-				TID:       tid,
-				EID:       eid,
-				From:      fmt.Sprintf("bounce+%s+%s@%s", tid, escapedFrom, host),
-				Rcpt:      emails,
-				LocalName: s.cfg.DefaultHost, // TODO get local name from request...
-			}
+
+			j := s.spool.NewJob()
+
+			j.TID = tid
+			j.EID = eid
+			j.From = fmt.Sprintf("bounce+%s+%s+%s@%s", tid, escapedFrom, s.cfg.DefaultHost, host)
+			j.Rcpt = emails
+
+			_ = j.Log().
+				With("kid", kid).
+				With("from", email.From.Email).
+				With("rcpt", emails).
+				WithOmitEmpty("reply-to", email.Headers.GetFirst("Reply-To")).
+				Printf("[api] created job")
+			return j
 		})
 
 		err = s.spool.Enqueue(jobs, emlreader) // todo add signer.

@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/modfin/brev/internal/metrics"
 	"github.com/modfin/brev/pkg/zid"
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -25,7 +28,7 @@ const canonical string = "canonical"
 
 const queue string = "queue"
 const processing string = "processing"
-const sent string = "sent"
+const sent string = "success"
 const failed string = "failed"
 const retry string = "retry"
 
@@ -38,11 +41,6 @@ type Spooler interface {
 	Stop(ctx context.Context) error
 	Enqueue(job []Job, email io.Reader) error
 	Queue() <-chan *Job
-
-	//Dequeue(eid xid.ID) (*Job, error)
-	//Succeed(eid xid.ID) error
-	//Fail(eid xid.ID) error
-	//Logf(eid xid.ID, format string, args ...interface{}) error
 }
 
 type Job struct {
@@ -54,7 +52,7 @@ type Job struct {
 	Try       int       `json:"try"`
 	NotBefore time.Time `json:"not-before"`
 
-	LocalName string `json:"local_name"`
+	//LocalName string `json:"local_name"`
 
 	spool *Spool
 }
@@ -77,6 +75,7 @@ func (j *Job) Fail() error {
 	if j.spool == nil {
 		return fmt.Errorf("job has not been initialized and has no reference to spool")
 	}
+	j.spool.metrics.failed.Inc()
 	return j.spool.Move(j.TID, processing, failed)
 }
 
@@ -84,6 +83,7 @@ func (j *Job) Success() error {
 	if j.spool == nil {
 		return fmt.Errorf("job has not been initialized and has no reference to spool")
 	}
+	j.spool.metrics.success.Inc()
 	return j.spool.Move(j.TID, processing, sent)
 }
 
@@ -109,9 +109,6 @@ func (j *Job) WriteTo(w io.Writer) (n int64, err error) {
 	return io.Copy(w, r)
 }
 
-func (j *Job) Logf(format string, args ...any) error {
-	return j.spool.Logf(j.TID, format, args...)
-}
 func (j *Job) Retry() error {
 	if j.spool == nil {
 		return fmt.Errorf("job has not been initialized and has no reference to spool")
@@ -137,16 +134,71 @@ func (j *Job) Retry() error {
 		return fmt.Errorf("job %s is already in queue", j.TID)
 	}
 	if status == sent {
-		return fmt.Errorf("job %s is already sent", j.TID)
+		return fmt.Errorf("job %s is already success", j.TID)
 	}
 	if status == retry {
 		return fmt.Errorf("job %s is already in retry", j.TID)
 	}
 
+	j.spool.metrics.retry.Inc()
 	return j.spool.Move(j.TID, status, retry)
 }
 
-func New(config Config, lc *tools.Logger, fs SFS) (*Spool, error) {
+func (j *Job) Log() *Entry {
+	return &Entry{j: j, kv: map[string]any{}, level: "info"}
+}
+
+type EntryLevel string
+
+const Info EntryLevel = "info"
+const Debug EntryLevel = "debug"
+const Error EntryLevel = "error"
+const Warning EntryLevel = "warning"
+
+type Entry struct {
+	j     *Job
+	level EntryLevel
+	kv    map[string]any
+}
+
+func (e *Entry) Error(err error) *Entry {
+	return e.Err().With("err", err.Error())
+}
+
+func (e *Entry) Err() *Entry {
+	e.level = Error
+	return e
+}
+
+func (e *Entry) Inf() *Entry {
+	e.level = Info
+	return e
+}
+func (e *Entry) Dbg() *Entry {
+	e.level = Debug
+	return e
+}
+func (e *Entry) Wrn() *Entry {
+	e.level = Warning
+	return e
+}
+
+func (e *Entry) With(key string, value any) *Entry {
+	e.kv[key] = value
+	return e
+}
+func (e *Entry) WithOmitEmpty(key string, value any) *Entry {
+	if reflect.ValueOf(value).IsZero() {
+		return e
+	}
+	e.kv[key] = value
+	return e
+}
+func (e *Entry) Printf(format string, args ...any) error {
+	return e.j.spool.Log(e.j.TID, e.level, e.kv, fmt.Sprintf(format, args...))
+}
+
+func New(config Config, fs SFS, metrics *metrics.Metrics, lc *tools.Logger) (*Spool, error) {
 
 	logger := lc.New("spool")
 
@@ -157,11 +209,37 @@ func New(config Config, lc *tools.Logger, fs SFS) (*Spool, error) {
 		queue: make(chan *Job), // ensures there is a handover.
 		ctx:   context.Background(),
 		sig:   make(chan struct{}, 1),
+
+		metrics: spoolMetrics{
+			enqueued: metrics.Register().NewCounter(prometheus.CounterOpts{Name: "spool_enqueued", Help: "accumulated number of enqueued emails"}),
+			dequeued: metrics.Register().NewCounter(prometheus.CounterOpts{Name: "spool_dequeued", Help: "accumulated number of dequeued emails"}),
+			requeued: metrics.Register().NewCounter(prometheus.CounterOpts{Name: "spool_requeued", Help: "accumulated number of requeued emails"}),
+
+			failed:  metrics.Register().NewCounter(prometheus.CounterOpts{Name: "spool_failed", Help: "accumulated number of failed emails"}),
+			retry:   metrics.Register().NewCounter(prometheus.CounterOpts{Name: "spool_retry", Help: "accumulated number of retried emails"}),
+			success: metrics.Register().NewCounter(prometheus.CounterOpts{Name: "spool_success", Help: "accumulated number of success emails"}),
+
+			dequeueWalk: metrics.Register().NewCounter(prometheus.CounterOpts{Name: "spool_dequeue_walk", Help: "number of times the spool walker has walked the queue"}),
+			retryWalk:   metrics.Register().NewCounter(prometheus.CounterOpts{Name: "spool_retry_walk", Help: "number of times the spool walker has walked the retry queue"}),
+		},
 	}
 
 	s.start()
 	return s, nil
 
+}
+
+type spoolMetrics struct {
+	enqueued prometheus.Counter
+	dequeued prometheus.Counter
+	requeued prometheus.Counter
+
+	failed  prometheus.Counter
+	retry   prometheus.Counter
+	success prometheus.Counter
+
+	dequeueWalk prometheus.Counter
+	retryWalk   prometheus.Counter
 }
 
 type Spool struct {
@@ -175,10 +253,14 @@ type Spool struct {
 	ostart sync.Once
 	ostop  sync.Once
 
-	sig chan struct{}
-	fs  SFS
+	sig     chan struct{}
+	fs      SFS
+	metrics spoolMetrics
 }
 
+func (s *Spool) NewJob() Job {
+	return Job{spool: s}
+}
 func (s *Spool) start() {
 	s.ostart.Do(func() {
 		s.ctx, s.cancel = context.WithCancel(compare.Coalesce(s.ctx, context.Background()))
@@ -225,6 +307,7 @@ func (s *Spool) startProducer() {
 		}
 
 		s.log.Debug("walker; start walking queue dir")
+		s.metrics.dequeueWalk.Inc()
 		s.fs.Walk(queue, func(tid string) {
 
 			s.log.WithField("tid", tid).Debug("walker; dequeue job")
@@ -252,6 +335,7 @@ func (s *Spool) startRetryer() {
 		}
 
 		s.log.Debug("retry walker; start walking retry dir")
+		s.metrics.retryWalk.Inc()
 		s.fs.Walk(retry, func(tid string) {
 
 			s.log.WithField("tid", tid).Debug("retry walker; checking job, opening file, %s", tid)
@@ -259,7 +343,7 @@ func (s *Spool) startRetryer() {
 			data, err := ReadAll(retry, tid, s.fs)
 			if err != nil {
 				err = fmt.Errorf("could not read job file: %w", err)
-				_ = s.Logf(tid, "[spool error] faild read retry email: %s", err.Error())
+				_ = s.Log(tid, Error, logWith("err", err), "[spool] failed read retry emailm could not read job file")
 				s.log.WithError(err).WithField("tid", tid).Error("retry failed; could not read job file")
 				return
 			}
@@ -268,7 +352,7 @@ func (s *Spool) startRetryer() {
 			err = json.Unmarshal(data, &job)
 			if err != nil {
 				err = fmt.Errorf("could not unmarshal job, %w", err)
-				_ = s.Logf(tid, "[spool error] faild to retry email: %s", err.Error())
+				_ = s.Log(tid, Error, logWith("err", err), "[spool] failed to retry email, count not unmarshal job")
 				s.log.WithError(err).WithField("tid", tid).Error("retry failed; could not unmarshal job")
 				return
 			}
@@ -277,7 +361,7 @@ func (s *Spool) startRetryer() {
 				s.log.WithField("tid", tid).Debug("retry walker; requeueing job")
 				err = s.Requeue(tid)
 				if err != nil {
-					_ = s.Logf(tid, "[spool error] faild to retry email: %s", err.Error())
+					_ = s.Log(tid, Error, logWith("err", err), "[spool] failed to retry email, could not requeue job")
 					s.log.WithError(err).WithField("tid", tid).Error("retry failed; could not requeue job")
 				}
 			}
@@ -286,9 +370,17 @@ func (s *Spool) startRetryer() {
 	}
 }
 
-// Probably implment file locking
-// https://github.com/juju/fslock
-// https://github.com/juju/mutex
+func logWith(k string, v any, kv ...any) map[string]any {
+	m := map[string]any{k: v}
+	for i := 0; i+1 < len(kv); i += 2 {
+		k, ok := kv[i].(string)
+		if !ok {
+			continue
+		}
+		m[k] = kv[i+1]
+	}
+	return m
+}
 
 func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 	if len(jobs) == 0 {
@@ -352,8 +444,9 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 				return errors.Join(err, undo())
 			}
 			s.log.WithField("tid", job.TID).Debugf("enqueue; email had been enqueued")
-			_ = s.Logf(job.TID, "[spool] email has been written to disk and enqueued")
-			_ = s.Logf(job.TID, "[spool] rcpt [%s]", strings.Join(job.Rcpt, " "))
+			_ = s.Log(job.TID, Info, nil, "[spool] email has been written to disk and enqueued")
+
+			s.metrics.enqueued.Inc()
 			return nil
 		}
 		err = fun()
@@ -366,19 +459,22 @@ func (s *Spool) Enqueue(jobs []Job, email io.Reader) error {
 
 }
 
-func (s *Spool) Logf(tid string, format string, args ...interface{}) (err error) {
-
+func (s *Spool) Log(tid string, level EntryLevel, param map[string]any, msgstr string) (err error) {
 	s.fs.Lock(tid + ".log")
 	defer s.fs.Unlock(tid + ".log")
 
 	msg := struct {
-		TS  string `json:"ts"`
-		TID string `json:"tid"`
-		MSG string `json:"msg"`
+		TS     string         `json:"ts"`
+		TID    string         `json:"tid"`
+		Level  EntryLevel     `json:"level"`
+		MSG    string         `json:"msg"`
+		Params map[string]any `json:"params,omitempty"`
 	}{
-		TS:  time.Now().In(time.UTC).Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z"),
-		TID: tid,
-		MSG: fmt.Sprintf(format, args...),
+		TS:     time.Now().In(time.UTC).Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z"),
+		TID:    tid,
+		Level:  level,
+		MSG:    msgstr,
+		Params: param,
 	}
 
 	buff := bytes.Buffer{}
@@ -390,6 +486,7 @@ func (s *Spool) Logf(tid string, format string, args ...interface{}) (err error)
 	}
 	return s.logf(tid, buff.Bytes())
 }
+
 func (s *Spool) logf(tid string, data []byte) (err error) {
 	f, err := s.fs.OpenWriter(log, tid)
 	if err != nil {
@@ -420,14 +517,14 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	var err error
 	if !s.fs.Exist(queue, tid) {
 		err = fmt.Errorf("could not find job file in queue dir, %s, err: %w", tid, ErrNotFound)
-		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
+		_ = s.Log(tid, Error, logWith("err", err), "[spool] failed to dequeue email, could not find job file in queue dir")
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not find job file in queue dir")
 		return nil, err
 	}
 
 	if !s.fs.Exist(canonical, tid) {
 		err = fmt.Errorf("email file, %s, does not exist", tid)
-		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
+		_ = s.Log(tid, Error, logWith("err", err), "[spool] failed to dequeue email, canonical file does not exist")
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; email file does not exist")
 		return nil, err
 	}
@@ -435,7 +532,7 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	err = s.move(tid, queue, processing)
 	if err != nil {
 		err = fmt.Errorf("could not rename job file: %w", err)
-		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
+		_ = s.Log(tid, Error, logWith("err", err), "[spool] failed to dequeue email, could not move file")
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not rename job file")
 		return nil, err
 	}
@@ -443,7 +540,7 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	data, err := ReadAll(processing, tid, s.fs)
 	if err != nil {
 		err = fmt.Errorf("could not read job file: %w", err)
-		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
+		_ = s.Log(tid, Error, logWith("err", err), "[spool] failed to dequeue email, could not read job file")
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not read job file")
 		return nil, err
 	}
@@ -453,14 +550,15 @@ func (s *Spool) Dequeue(tid string) (*Job, error) {
 	err = json.Unmarshal(data, &job)
 	if err != nil {
 		err = fmt.Errorf("could not unmarshal job, %w", err)
-		_ = s.Logf(tid, "[spool error] faild to dequeue email: %s", err.Error())
+		_ = s.Log(tid, Error, logWith("err", err), "[spool] faild to dequeue email, could not unmarshal job")
 		s.log.WithError(err).WithField("tid", tid).Error("dequeue failed; could not unmarshal job")
 		return nil, err
 	}
 	job.spool = s
 
-	_ = s.Logf(tid, "[spool] email had been dequeued for processing")
+	_ = s.Log(tid, Info, nil, "[spool] email had been dequeued for processing")
 	s.log.WithField("tid", job.TID).Debugf("dequeue; email had been dequeued")
+	s.metrics.dequeued.Inc()
 	return &job, nil
 }
 
@@ -481,10 +579,12 @@ func (s *Spool) Requeue(tid string) error {
 		return fmt.Errorf("could not Move job file from %s to queu: %w", status, err)
 	}
 
+	s.metrics.requeued.Inc()
+
 	// Inform the walker that there is a new job to be dequeued
 	s.sigEnqueue()
 
-	_ = s.Logf(tid, "[spool] email has been requeued, moved from '%s' to 'queue'", status)
+	_ = s.Log(tid, Info, logWith("status_from", status, "status_to", queue), fmt.Sprintf("[spool] email has been requeued, moved from '%s' to 'queue'", status))
 	s.log.WithField("tid", tid).Debugf("succeed; email had been requeued")
 
 	return nil
@@ -526,7 +626,7 @@ func (s *Spool) move(tid string, from string, to string) error {
 		return fmt.Errorf("could not Move job file from %s to %s: %w", from, to, err)
 	}
 
-	_ = s.Logf(tid, "[spool] email has marked as '%s', moved from '%s' to '%s'", to, from, to)
+	_ = s.Log(tid, Info, logWith("status_from", from, "status_to", to), fmt.Sprintf("[spool] email has marked as '%s', moved from '%s' to '%s'", to, from, to))
 	s.log.WithField("tid", tid).Debugf("Move; email had moved from %s to %s", from, to)
 	return nil
 }

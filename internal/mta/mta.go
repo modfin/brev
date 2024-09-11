@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"github.com/alitto/pond"
 	"github.com/modfin/brev/internal/dnsx"
+	"github.com/modfin/brev/internal/metrics"
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"math"
-	"math/rand"
 	"runtime"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ import (
 )
 
 type Config struct {
+	FQDN string `cli:"default-host"`
+
 	PoolSize                 int      `cli:"mta-pool-size"`
 	RouterDefaultConcurrency int      `cli:"mta-router-default-concurrency"`
 	RouterServerConcurrency  []string `cli:"mta-router-server-concurrency"`
@@ -44,13 +47,19 @@ type MTA struct {
 	router *router
 
 	backoffer *backoffer
+	metrics   mtaMetrics
+}
+
+type mtaMetrics struct {
+	dequeued  prometheus.Counter
+	histogram *prometheus.HistogramVec
 }
 
 type queue interface {
 	Queue() <-chan *spool.Job
 }
 
-func New(cfg Config, spool queue, dns dnsx.MXer, lc *tools.Logger) *MTA {
+func New(cfg Config, spool queue, dns dnsx.MXer, metrics *metrics.Metrics, lc *tools.Logger) *MTA {
 
 	logger := lc.New("mta")
 
@@ -59,8 +68,12 @@ func New(cfg Config, spool queue, dns dnsx.MXer, lc *tools.Logger) *MTA {
 		cfg:       cfg,
 		log:       logger,
 		dns:       dns,
-		router:    newRouter(lc, cfg),
+		router:    newRouter(lc, cfg, metrics),
 		backoffer: NewBackoffer(compare.Coalesce(cfg.Retries, 5), compare.Coalesce(cfg.RetriesDuration, 24*time.Hour)),
+		metrics: mtaMetrics{
+			dequeued:  metrics.Register().NewCounter(prometheus.CounterOpts{Name: "mta__dequeued", Help: "number of emails dequeued to be processed by mta"}),
+			histogram: metrics.Register().NewHistogramVec(prometheus.HistogramOpts{Name: "mta__duration", Help: "duration borrowHistogram for emails processed"}, []string{"status", "mx"}),
+		},
 	}
 
 	go m.start()
@@ -74,13 +87,15 @@ func (m *MTA) start() {
 
 	for job := range m.spool.Queue() {
 
+		m.metrics.dequeued.Inc()
+
 		if m.pool.Stopped() {
 			m.log.WithField("eid", job.EID).Warn("pool stopped, skipping email")
 			_ = job.Requeue()
 			continue
 		}
 
-		_ = job.Logf("[mta] submitting job to pool, %s", job.TID)
+		_ = job.Log().Printf("[mta] submitting job to pool")
 		f := m.send(job)
 		m.pool.Submit(f)
 		m.log.WithField("tid", job.TID).Debug("email submitted to mta")
@@ -91,18 +106,30 @@ func (m *MTA) start() {
 func (m *MTA) send(job *spool.Job) func() {
 
 	return func() {
-		_ = job.Logf("[mta] starting job")
+		var label string
+		var mx string
+		start := time.Now()
+		defer func() {
+			m.metrics.histogram.WithLabelValues(label, mx).Observe(time.Since(start).Seconds())
+		}()
+		_ = job.Log().Printf("[mta] starting job")
 
 		mxs, err := m.mxsOf(job.Rcpt)
 		if err != nil {
 			m.log.WithError(err).WithField("tid", job.TID).Error("could not find mx servers for emails")
 
-			_ = job.Logf("[mta error] could not find mx servers for emails %s, err: %s", job.TID, err.Error())
+			_ = job.Log().
+				Error(err).
+				Printf("[mta] could not find mx servers for emails %s", job.TID)
 			_ = job.Fail()
+			label = "failed"
 			return
 		}
+		if len(mxs) > 0 {
+			mx = mxs[0]
+		}
 
-		_ = job.Logf("[mta] submitting to router with mx servers [%s]", strings.Join(mxs, " "))
+		_ = job.Log().With("mx", mxs).Printf("[mta] submitting to router with mx servers")
 		m.log.WithField("tid", job.TID).Debugf("submitting email to smtp mta router")
 
 		err = m.router.Route(context.Background(), job, mxs)
@@ -112,36 +139,27 @@ func (m *MTA) send(job *spool.Job) func() {
 
 			err = job.Success()
 			if err != nil {
-				_ = job.Logf("[mta error] could not mark email %s as sent, err: %s", job.TID, err.Error())
+				_ = job.Log().Error(err).Printf("[mta] could not mark email as sent")
 				m.log.WithError(err).WithField("tid", job.TID).Error("could not mark email as successful")
 
 			}
-			_ = job.Logf("[mta] done, returning worker to pool")
+			_ = job.Log().Printf("[mta] done, returning worker to pool")
+			label = "success"
 			return
 		}
 
 		m.log.WithError(err).WithField("tid", job.TID).Error("could not route email")
-		_ = job.Logf("[mta error] could not route email %s, err: %s", job.TID, err.Error())
-
-		if errors.Is(err, ErrNoAvailableConnections) { // potential never ending loop?
-			/// Retrying with some jitter
-			job.NotBefore = time.Now().Add(time.Duration(
-				float64(m.backoffer.MustBackoff(0)) * rand.Float64(),
-			))
-			err = job.Retry()
-			if err != nil {
-				m.log.WithError(err).WithField("tid", job.TID).Error("could not add email to retry queue")
-				_ = job.Logf("[mta error] could not add email to retry queue %s, err: %s", job.TID, err.Error())
-			}
-			return
-		}
+		_ = job.Log().Error(err).Printf("[mta] could not route email")
 
 		if IsRecoverable(err) && job.Try < m.cfg.Retries {
+			m.log.WithField("tid", job.TID).Debugf("email failed but is recoverable, retrying")
+
 			next, err := m.backoffer.Backoff(job.Try)
 			if err != nil {
 				m.log.WithError(err).WithField("tid", job.TID).Debugf("could not backoff")
-				_ = job.Logf("[mta error] could not backoff %s, err: %s", job.TID, err.Error())
+				_ = job.Log().Error(err).Printf("[mta] could not backoff")
 				_ = job.Fail()
+				label = "failed"
 				return
 			}
 
@@ -150,12 +168,14 @@ func (m *MTA) send(job *spool.Job) func() {
 			err = job.Retry()
 			if err != nil {
 				m.log.WithError(err).WithField("tid", job.TID).Error("could not add email to retry queue")
-				_ = job.Logf("[mta error] could not add email to retry queue %s, err: %s", job.TID, err.Error())
+				_ = job.Log().Error(err).Printf("[mta] could not add email to retry queue")
 			}
+			label = "retryable"
 			return
 		}
-		_ = job.Logf("[mta error] error for %s is not recoverable, err: %s", job.TID, err.Error())
+		_ = job.Log().Error(err).Printf("[mta] error is not recoverable")
 		_ = job.Fail()
+		label = "failed"
 		return
 
 	}

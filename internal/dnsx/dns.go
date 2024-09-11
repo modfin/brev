@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/miekg/dns"
+	"github.com/modfin/brev/internal/metrics"
 	"github.com/modfin/brev/tools"
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/slicez"
@@ -35,7 +36,7 @@ type MXer interface {
 	MX(domain string) ([]string, error)
 }
 
-func New(cfg Config, lc *tools.Logger) Client {
+func New(cfg Config, lc *tools.Logger, metrics *metrics.Metrics) Client {
 	logger := lc.New("dnsx")
 	m := &client{
 		mxCache: ttlcache.New[string, []string](ttlcache.WithDisableTouchOnHit[string, []string]()),

@@ -6,7 +6,7 @@ triggers:
     env:
       DEBUG: '1'
     cmd: |-
-      cd /brev && go run ./cmd/brevd/brevd.go  serve \
+      cd /brev && go run ./cmd/brevd/brevd.go serve --dev\
         --default-host=mx0.example.com \
         --http-interface="0.0.0.0" \
         --spool-dir=./spool-data \
@@ -17,7 +17,8 @@ triggers:
         --mta-router-server-concurrency=aspmx.l.google.com=2 \
         --mta-retry=3 \
         --mta-retry-duration=4m \
-        --dev
+        --metrics-poll
+
     shell: true
     delay: 100ms
     stop_timeout: 500ms

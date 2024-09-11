@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/modfin/brev/internal/clix"
 	"github.com/modfin/brev/internal/dnsx"
+	"github.com/modfin/brev/internal/metrics"
 	"github.com/modfin/brev/internal/mta"
 	"github.com/modfin/brev/internal/spool"
 	"github.com/modfin/brev/internal/web"
@@ -154,6 +155,29 @@ aspmx.l.google.com to 50`,
 						Usage: "ip address (and port) of the dns server/resolver to use for resolving DNS records",
 						Value: "1.1.1.1:53",
 					},
+
+					&cli.StringFlag{
+						Name:  "metrics-push-url",
+						Usage: "if set, brev will push prometheus metrics to the given url, eg. https://pushgateway.example.com:9091/metrics/job/brev",
+					},
+					&cli.DurationFlag{
+						Name:  "metrics-push-interval",
+						Value: 1 * time.Minute,
+						Usage: "how often should brev push metrics to the push gateway",
+					},
+
+					&cli.BoolFlag{
+						Name:  "metrics-poll",
+						Usage: "if set, brev will expose prometheus metrics on a http /metrics endpoint ",
+					},
+					&cli.StringFlag{
+						Name:  "metrics-poll-basic-auth-user",
+						Usage: "if set, brev will require basic auth for the /metrics endpoint, the username to use for basic auth",
+					},
+					&cli.StringFlag{
+						Name:  "metrics-poll-basic-auth-pass",
+						Usage: "if set, brev will require basic auth for the /metrics endpoint, the password to use for basic auth",
+					},
 				},
 			},
 		},
@@ -179,7 +203,6 @@ func start(c *cli.Context) error {
 	}
 
 	lc := tools.LoggerCloner(l)
-
 	l = lc.New("brevd")
 
 	var stopServer func()
@@ -193,25 +216,27 @@ func start(c *cli.Context) error {
 
 	var services []Stoppable
 
-	sfs, err := spool.NewLocalFS(c.String("spool-dir"))
+	metrics := metrics.New(cfg.Metrics, lc)
+
+	sfs, err := spool.NewLocalFS(c.String("spool-dir"), metrics)
 	if err != nil {
 		return err
 	}
-	spool, err := spool.New(cfg.Spool, lc, sfs)
+	spool, err := spool.New(cfg.Spool, sfs, metrics, lc)
 	if err != nil {
 		return err
 	}
 	services = append(services, spool)
 
 	var dnsxc dnsx.Client
-	dnsxc = dnsx.New(cfg.DNSX, lc)
+	dnsxc = dnsx.New(cfg.DNSX, lc, metrics)
 	services = append(services, dnsxc)
 	if cfg.Dev {
 		dnsxc = dnsx.NewMock("mailhog:1025")
 		l.Warning("Dev mode, using mailhog as DNS resolver")
 	}
 
-	mta := mta.New(cfg.MTA, spool, dnsxc, lc)
+	mta := mta.New(cfg.MTA, spool, dnsxc, metrics, lc)
 	services = append(services, mta)
 
 	// TODO validate that private key matches up with public key in DNS record provided by domain and selector
@@ -220,7 +245,7 @@ func start(c *cli.Context) error {
 		return fmt.Errorf("could not create signer: %w", err)
 	}
 
-	websrv := web.New(c.Context, cfg.Web, spool, lc)
+	websrv := web.New(c.Context, cfg.Web, spool, metrics, lc)
 	services = append(services, websrv)
 
 	sigc := make(chan os.Signal, 1)
@@ -270,9 +295,10 @@ type Stoppable interface {
 type Config struct {
 	Dev bool `cli:"dev"`
 
-	Web   web.Config
-	Spool spool.Config
-	DKIM  signer.Config
-	MTA   mta.Config
-	DNSX  dnsx.Config
+	Web     web.Config
+	Spool   spool.Config
+	DKIM    signer.Config
+	MTA     mta.Config
+	DNSX    dnsx.Config
+	Metrics metrics.Config
 }

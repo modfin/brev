@@ -15,8 +15,8 @@ import (
 	"github.com/modfin/henry/compare"
 	"github.com/modfin/henry/mon"
 	"github.com/modfin/henry/slicez"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -186,15 +186,9 @@ func gendkim(c *cli.Context) (err error) {
 
 type printer struct{}
 
-func (p printer) Logf(format string, args ...interface{}) {
-
-	log.Default().Printf(format, slicez.Map(args, func(a any) any {
-		switch a := a.(type) {
-		case string:
-			return strings.ReplaceAll(a, "\n", "; ")
-		}
-		return a
-	})...)
+func (p printer) Logf(format string, args ...interface{}) error {
+	logrus.Infof(format, args...)
+	return nil
 }
 
 func sendmail(c *cli.Context) (err error) {
